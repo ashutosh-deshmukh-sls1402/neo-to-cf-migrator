@@ -1,0 +1,22 @@
+{
+  "name": "neo-to-cf-migrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Convert a SAP NEO (XSJS/XSC) codebase into a SAP CF (CAP/Node.js) codebase.",
+  "bin": {
+    "neo2cf": "bin/neo2cf.js"
+  },
+  "scripts": {
+    "test": "node test/run.js",
+    "inventory": "node bin/neo2cf.js inventory",
+    "verify": "node checks/verify.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "acorn": "^8.18.0",
+    "fast-xml-parser": "^5.11.1"
+  }
+}
