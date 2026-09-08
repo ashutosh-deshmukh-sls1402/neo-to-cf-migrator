@@ -12,7 +12,7 @@
  * becomes
  *
  *   import { createJobBid } from "../Library/handlers/TECK_HR_CreateAllDraftPosting.js";
- *   srv.on("hsc3ogvpw9briuci", async (req) => await createJobBid(req));
+ *   srv.on("hsc3ogvpw9briuci", async (req) => { return await createJobBid(req); });
  *
  * Two checklist rules are structural here and so are satisfied by construction:
  *   item 7a — ES `import`, never `require()`
@@ -128,7 +128,9 @@ export function generateServiceJs(parsed, opts = {}) {
 
   const handlerLines = bindings.map(
     // item 7b: the event is the alias. item 14: req goes straight through.
-    (b) => `  srv.on('${b.alias}', async (req) => await ${b.local}(req));`,
+    // The braces are the point: an expression body returns too, but CAP's answer
+    // to the caller is whatever this handler returns, so it is written out.
+    (b) => `  srv.on('${b.alias}', async (req) => { return await ${b.local}(req); });`,
   );
 
   if (!bindings.length) {

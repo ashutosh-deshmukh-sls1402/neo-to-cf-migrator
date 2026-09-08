@@ -36,6 +36,24 @@ const XSODATA = `service {
   create using "S.MOD.Library:MyLib.xsjslib::notThere";
 }`;
 
+/** A minimal script-based calc view; `id` is what the entity is named after. */
+const VIEW = (id) => `<?xml version="1.0" encoding="UTF-8"?>
+<Calculation:scenario xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:Calculation="http://www.sap.com/ndb/BiModelCalculation.ecore" id="${id}" schemaVersion="2.3" calculationScenarioType="SCRIPT_BASED">
+<descriptions defaultDescription="${id}"/>
+<localVariables/>
+<variableMappings/>
+<dataSources/>
+<calculationViews>
+  <calculationView xsi:type="Calculation:SqlScriptView" id="Script_View">
+    <viewAttributes><viewAttribute id="COL" datatype="INTEGER"/></viewAttributes>
+    <definition>BEGIN
+var_out = select 1 as COL from DUMMY;
+END</definition>
+  </calculationView>
+</calculationViews>
+<logicalModel id="Script_View"/>
+</Calculation:scenario>`;
+
 const codes = (r) => r.findings.map((f) => f.code);
 
 test('convert emits a handler for every .xsjs/.xsjslib, at the srv/lib path', () => {
@@ -90,4 +108,158 @@ test('every relative import in the emitted JavaScript points at a file we also e
   }
   assert.ok(specs.length, 'expected at least one relative import');
   for (const s of specs) assert.ok(emitted.has(s), `${s} is imported but never emitted`);
+});
+
+test('one .cds per calc view by default; cdsProxy.bundle collapses them', () => {
+  const files = { 'MOD/Views/V1.calculationview': VIEW('V1'), 'MOD/Views/V2.calculationview': VIEW('V2') };
+  const spread = convert(tree(files), { schema: 'S' });
+  assert.deepEqual(
+    spread.files.filter((f) => f.role === 'cdsproxy').map((f) => f.path).sort(),
+    ['db/cds/Views/S_MOD_VIEWS_V1.cds', 'db/cds/Views/S_MOD_VIEWS_V2.cds'],
+  );
+
+  const single = convert(tree(files), { schema: 'S', config: { cdsProxy: { bundle: 'all' } } });
+  const proxies = single.files.filter((f) => f.role === 'cdsproxy');
+  assert.deepEqual(proxies.map((f) => f.path), ['db/cds/schema.cds']);
+  // every entity still there, each still saying which view it came from
+  assert.match(proxies[0].text, /entity S_MOD_VIEWS_V1 \{/);
+  assert.match(proxies[0].text, /entity S_MOD_VIEWS_V2 \{/);
+  assert.equal(proxies[0].text.match(/converted from:/g).length, 2);
+});
+
+test("cdsProxy.bundle 'module' gives one .cds per top-level module", () => {
+  const r = convert(
+    tree({ 'MOD/Views/V1.calculationview': VIEW('V1'), 'OTHER/Views/V2.calculationview': VIEW('V2') }),
+    { schema: 'S', config: { cdsProxy: { bundle: 'module' } } },
+  );
+  const proxies = r.files.filter((f) => f.role === 'cdsproxy');
+  assert.deepEqual(
+    proxies.map((f) => f.path).sort(),
+    ['db/cds/MOD/MOD_schema.cds', 'db/cds/OTHER/OTHER_schema.cds'],
+  );
+  // each module's entities live only in that module's file
+  const mod = proxies.find((f) => f.path.startsWith('db/cds/MOD/'));
+  assert.match(mod.text, /entity S_MOD_VIEWS_V1 {/);
+  assert.doesNotMatch(mod.text, /S_OTHER_VIEWS_V2/);
+  // and the service.cds `using` follows the proxy to wherever it landed
+});
+
+/* ---------------- create-using actions and their payload ---------------- */
+
+/** A library whose handler reads the payload out of the NEO after table. */
+const EXIT = `
+function doExit(param) {
+  var after = param.afterTableName;
+  var pstmt = param.connection.prepareStatement('SELECT PAYLOAD FROM "' + after + '"');
+  var rs = pstmt.executeQuery();
+  if (rs.next()) { var oIn = JSON.parse(rs.getNString(1)); }
+}
+`;
+
+const xsodata = (entity) => `service {\n${entity}\n}`;
+
+test('a create-using action declares the with(…) columns, minus the key', () => {
+  const root = tree({
+    'MOD/Library/Lib.xsjslib': EXIT,
+    'MOD/Services/svc.xsodata': xsodata(`
+  "S.MOD.Views::V" as "act"
+  with("PAYLOAD","COL")
+  key("COL")
+  create using "S.MOD.Library:Lib.xsjslib::doExit";`),
+    'MOD/Views/V.calculationview': VIEW('V'),
+  });
+  const cds = convert(root, { schema: 'S' }).files.find((f) => f.role === 'servicecds');
+  assert.match(cds.text, /action act\(PAYLOAD: LargeString\) returns String;/);
+});
+
+test('a create-using entity with no with(…) still gets the parameter its handler reads', () => {
+  const root = tree({
+    'MOD/Library/Lib.xsjslib': EXIT,
+    'MOD/Services/svc.xsodata': xsodata(`
+  "S.MOD.Views::V" as "act"
+  key("ID")
+  create using "S.MOD.Library:Lib.xsjslib::doExit";`),
+    'MOD/Views/V.calculationview': VIEW('V'),
+  });
+  const r = convert(root, { schema: 'S' });
+  const cds = r.files.find((f) => f.role === 'servicecds');
+  assert.match(cds.text, /action act\(PAYLOAD: LargeString\) returns String;/);
+  assert.ok(codes(r).includes('ACTION_PAYLOAD_FROM_HANDLER'), codes(r).join(','));
+  // and the handler reads exactly that name
+  const js = r.files.find((f) => f.path.endsWith('handlers/Lib.js'));
+  assert.match(js.text, /param\.data\.PAYLOAD/);
+});
+
+test('converting a subfolder puts back the package segments above it', () => {
+  const files = {
+    'RSM/Views/V.calculationview': VIEW('V'),
+    'RSM/Services/svc.xsodata': xsodata(`
+  "S.RSM.Views::V" as "a"
+  key("ID")`),
+  };
+  // The whole repository: every reference resolves, nothing is inferred.
+  const whole = convert(tree(files), { schema: 'S' });
+  assert.equal(whole.findings.filter((f) => f.level === 'blocked').length, 0);
+  assert.ok(!codes(whole).includes('NEO_SUBTREE_ROOT'));
+
+  // Just the RSM folder: the .xsodata still says S.RSM.Views::V, which no path
+  // under this directory can spell. Inferred, not refused.
+  const sub = tree(files);
+  const r = convert(path.join(sub, 'RSM'), { schema: 'S' });
+  assert.equal(r.findings.filter((f) => f.level === 'blocked').length, 0, JSON.stringify(r.findings));
+  const note = r.findings.find((f) => f.code === 'NEO_SUBTREE_ROOT');
+  assert.match(note.message, /"RSM" subtree/);
+  // the entity is named as it would be from the repository root
+  assert.ok(r.files.some((f) => f.role === 'cdsproxy' && /entity S_RSM_VIEWS_V /.test(f.text)),
+    r.files.filter((f) => f.role === 'cdsproxy').map((f) => f.text).join('\n'));
+});
+
+test('--root-package "" takes the folder paths literally', () => {
+  const sub = tree({
+    'RSM/Views/V.calculationview': VIEW('V'),
+    'RSM/Services/svc.xsodata': xsodata(`
+  "S.RSM.Views::V" as "a"
+  key("ID")`),
+  });
+  const r = convert(path.join(sub, 'RSM'), { schema: 'S', config: { rootPackage: { package: '' } } });
+  assert.ok(!codes(r).includes('NEO_SUBTREE_ROOT'));
+  assert.ok(r.files.some((f) => f.role === 'cdsproxy' && /entity S_VIEWS_V /.test(f.text)));
+  // and now the reference really does not resolve, which is the honest answer
+  assert.ok(codes(r).includes('PROXY_NOT_FOUND'));
+});
+
+/* ---------------- AI_TIER_SUMMARY — telling "nothing eligible" from "never asked" ---------------- */
+
+test('--ai with nothing to ask says so, not just "0 findings"', () => {
+  // A handler that already returns, and no SQL at all: nothing for either
+  // Tier 2 task to look at.
+  const root = tree({ 'MOD/Library/MyLib.xsjslib': 'function f() { return 1; }\n' });
+  const ai = { name: 'stub', ask: () => '{"variable":"unknown"}' };
+  const r = convert(root, { schema: 'S', ai });
+  const note = r.findings.find((f) => f.code === 'AI_TIER_SUMMARY');
+  assert.ok(note, 'expected an AI_TIER_SUMMARY finding when --ai is given');
+  assert.match(note.message, /never asked/);
+});
+
+test('no --ai at all means no AI_TIER_SUMMARY — only given a backend is this worth saying', () => {
+  const root = tree({ 'MOD/Library/MyLib.xsjslib': 'function f() { return 1; }\n' });
+  const r = convert(root, { schema: 'S' });
+  assert.ok(!codes(r).includes('AI_TIER_SUMMARY'));
+});
+
+test('--ai that is actually asked reports how many times, and how many were accepted', () => {
+  const root = tree({
+    'MOD/Library/MyLib.xsjslib': 'function h() { var out; return out; }\nfunction empty() { var payload = {}; }\n',
+    'MOD/Services/svc.xsodata': `service {
+  "S.MOD.Views::V" as "aliasOne"
+  key("ID")
+  create using "S.MOD.Library:MyLib.xsjslib::empty";
+}`,
+  });
+  const ai = { name: 'stub', ask: () => '{"variable":"payload"}' };
+  const r = convert(root, { schema: 'S', ai });
+  const note = r.findings.find((f) => f.code === 'AI_TIER_SUMMARY');
+  assert.ok(note);
+  assert.match(note.message, /asked 1 time\(s\)/);
+  assert.match(note.message, /1 accepted/);
 });

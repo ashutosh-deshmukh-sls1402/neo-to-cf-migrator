@@ -10,8 +10,8 @@ For how it works internally, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ```bash
 cd C:/Sodales/Tools/neo-to-cf-migrator
-npm install          # two runtime dependencies: acorn, fast-xml-parser
-node test/run.js     # 264 tests, ~2s. Run this first, once.
+npm install          # three runtime dependencies: acorn, fast-xml-parser, prettier
+node test/run.js     # 345 tests, ~2s. Run this first, once.
 ```
 
 Node 18+. Nothing else is required — no HANA, no CF account, no model.
@@ -125,7 +125,42 @@ node bin/neo2cf.js dbscan $NEO --show Library/CommonUtil.xsjslib | less
 ```bash
 node bin/neo2cf.js convert <neo-dir> -o <out-dir> [--write] [--force]
                                      [--schema X] [--app A,B] [--ai <backend>] [--json]
+                                     [--single-cds | --module-cds] [--no-format]
+                                     [--root-package <p>]
 ```
+
+**Point it at the repository root.** A NEO `.xsodata` names its views by full
+package path (`ARBDR.RSM.AdminConsole.Views::X`), so converting a subfolder
+means no path in the tree can spell what the references ask for. That case is
+detected rather than refused: the missing segments are read back off the
+references, reported as `NEO_SUBTREE_ROOT`, and put in front of every emitted
+path — so `convert <repo>/RSM` produces exactly the slice of `convert <repo>`
+that RSM would have been. What it cannot produce is anything *outside* the
+subtree, so a `$.import` of another module is reported (`IMPORT_NOT_EMITTED`)
+and its cross-file `await` cannot be derived. `--root-package "" ` turns the
+inference off and takes the folder paths literally.
+
+The emitted JavaScript is run through **Prettier** as the last step. Everything
+before it splices — the original text edited by offset — so without it the
+output keeps NEO's tabs and the seams where a statement was deleted out of the
+middle of a block. `--no-format` skips it, which is what you want when a
+line-for-line diff against the NEO original matters more than the file reading
+like modern JavaScript.
+
+By default there is one `.cds` proxy per calculation view, mirroring the NEO
+tree — which is what makes a file findable from the view it came from. Two flags
+collapse that:
+
+| flag | `cdsProxy.bundle` | layout |
+|---|---|---|
+| *(none)* | `null` | `db/cds/<neo dirs>/<ENTITY>.cds`, one per view |
+| `--single-cds` | `'all'` | one `db/cds/schema.cds` |
+| `--module-cds` | `'module'` | one `db/cds/<MODULE>/<MODULE>_schema.cds` per top-level folder |
+
+Entity names carry their container either way, so nothing collides in a merged
+file and the `using` lines in each `service.cds` follow the proxy to wherever it
+landed. On ADC/ARBDR (HRS, INC, MTG, POWERBI, RSM) `--module-cds` turns 2,132
+proxy files into five.
 
 Without `--write` it is a **dry run**: it does the entire conversion in memory
 and reports what it would write. Do this first and read the findings.
@@ -206,6 +241,8 @@ out/
   db/
     src/…      .hdbcalculationview, TABLE_FUNCTION_*.hdbfunction, .hdbprocedure
     cds/…      one .cds proxy entity per calculation view
+               (--single-cds: all in db/cds/schema.cds;
+                --module-cds: db/cds/<MODULE>/<MODULE>_schema.cds)
     package.json, undeploy.json
   srv/
     lib/<SCHEMA>/…/service.cds     the CAP service
@@ -223,6 +260,7 @@ The folder structure mirrors NEO, with two deliberate asymmetries:
 ```bash
 grep -rn "NEEDS HUMAN REVIEW" out/srv     # every refusal, in place, with reasons
 grep -rn "AI-CLASSIFIED"      out/srv     # every statement a model decided (§4)
+grep -rn "AI-CHOSEN RETURN"   out/srv     # every handler answer a model chose (§4)
 ```
 
 A refusal is left as the original NEO code with the reasons directly above it:
@@ -260,8 +298,12 @@ What it does, and does not:
 
 - It is asked **only** about statements Tier 1 refused *and* that one answer
   would convert. On a 1,796-statement corpus that was 16 calls.
-- It answers a **question**, never code — one word per interpolated SQL value.
-  The conversion is then done by the same deterministic code as everything else.
+- It answers a **question**, never code — one word per interpolated SQL value,
+  or one variable name for an action handler that returns nothing (`handler-return`,
+  103 such handlers on the TECK corpus). The conversion is then done by the same
+  deterministic code as everything else; the model's pick is checked against the
+  AST — it must still be in scope where the `return` goes, must have a value
+  written to it, and can never be the handler's own `req`.
 - Its answer is re-checked by the full analysis. If the statement still does not
   resolve, the answer is dropped and you see the original refusal.
 - Everything it settled is marked `AI-CLASSIFIED` in the emitted file.
@@ -369,8 +411,21 @@ The tool is explicit about this rather than quiet, and the list is short.
 | `N blocker(s) outstanding — nothing was written` | Read them (they are printed above), fix or accept, then `--force` if you want the partial tree anyway. |
 | A handler file has no `import cds from "@sap/cds"` | That file has no database access — nothing to import. |
 | `DUPLICATE_FUNCTION` and the file does not load | A NEO defect the conversion exposes: the file declares one function twice, which an XSJS script allows and an ES module rejects. Delete the dead declaration in NEO and re-run. |
+| `VAR_KEPT` | Declarations left as `var` because `const`/`let` would change what the code does — usually a variable declared in a `try` and read from the `catch`, which block scoping puts out of reach. The finding names the lines and the rule. Move or rename the binding in NEO and re-run, or fix it by hand in the output. |
+| `HANDLER_NO_RETURN` | An action handler returns nothing, so CAP answers the caller with an empty 200 — the request succeeds and the payload is missing. NEO sent its answer through `$.response.setBody`, which converts to a `return`; this function never had one. The finding names the values in scope at the end of the function. Add the `return` by hand, or re-run with `--ai` and let Tier 2 pick one. |
+| `NEO_SUBTREE_ROOT` | The directory given is a subfolder of the NEO repository, not its root. Package names are built as if the segments above it were still there, so entity and procedure names match a whole-tree run — but nothing outside the subtree is here to convert. |
+| `IMPORT_NOT_EMITTED` | A converted handler imports a library this run did not convert. Normal when converting one module at a time; otherwise the library is missing from the NEO tree, or its package path does not match where it sits. |
+| `ACTION_PAYLOAD_FROM_HANDLER` | A `create using` action's parameter came from the handler (which reads `req.data.<column>`) rather than from the `.xsodata`'s `with(…)` clause, because that clause does not name it. 19 of ICBC's entities are like this. Check the parameter is the one the caller sends. |
+| `PROCEDURE_NAME_UNCHANGED` | A `.hdbprocedure` header does not declare a NEO repository path, so its name was left alone. Every other procedure's name is flattened to the name a handler's `cds.run('CALL …')` asks for; check this one agrees by hand. |
+| `DEFAULT_SCHEMA_FOREIGN` | `DEFAULT SCHEMA` names a schema this project does not own, so the clause was left in place. Unqualified names in that procedure resolve there, which an HDI container cannot do without a synonym. |
+| `AFTER_TABLE_PAYLOAD` | NEO read the request body out of a temporary table it named on `param.afterTableName`. CAP passes the request itself, so the `SELECT` is gone and the payload is `req.data.<COLUMN>`. Nothing to do — the note is there so a reader can see where the query went. |
+| `AFTER_TABLE_RESPONSE` | NEO's answer to the caller was an `UPDATE` writing it back into that table. It is now a `return`. Where code still runs after the write, the value is held in `neoResponse` and returned where the function ends instead — the finding says which happened. Check it is the value the caller should get. |
+| `FORMAT_FAILED` | Prettier could not parse a converted file, so it was written unformatted. A file that will not parse will not run either: this means an earlier pass produced broken JavaScript, and it is a bug worth reporting. |
+| `AI_RETURN_ADDED` | A model chose which variable an action handler answers with, and the tool wrote the `return`. Marked `AI-CHOSEN RETURN` in the file — read it. |
+| `AI_TIER_SUMMARY` | Printed once, only when `--ai` is given. Says how many times the model was actually asked and how many answers were accepted — see below. |
 | `cds build` reports a missing entity | A `.xsodata` projects a calculation view that is not in this tree (`PROXY_NOT_FOUND`). Convert the module that owns it, or drop the entity. |
 | `--ai claude` fails with "could not be reached" | The `claude` CLI is not on `PATH`, or not authenticated. The run continues without it; refusals stay refusals. |
+| `--ai` finishes instantly with nothing to show for it | Read the `AI_TIER_SUMMARY` finding first — a fast run isn't necessarily a broken backend. The two Tier 2 tasks are narrow on purpose: `hole-classify` only applies to a SQL string built by concatenation with a hole quote-parity cannot decide, and `handler-return` only applies to an action handler that returns nothing but has a candidate variable to offer. A subtree conversion in particular can easily have zero of either — most of its refusals are things Tier 1 already resolved, or shapes Tier 2 explicitly is not for (`SQL_DYNAMIC` from `query += …`, service-name collisions, missing keys, …). If `AI_TIER_SUMMARY` says "asked N time(s)", the backend ran; if it says "the model was never asked", nothing in this run matched either task and the backend was never the problem. |
 
 ---
 

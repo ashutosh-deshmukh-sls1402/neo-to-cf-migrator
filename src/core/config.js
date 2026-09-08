@@ -12,6 +12,14 @@ export const DEFAULTS = Object.freeze({
   schema: null,
   apps: [],
 
+  /**
+   * Package segments between the schema and the root of the tree being
+   * converted — set only when converting a subfolder of a NEO repository.
+   * `null` (the default) infers it from the .xsodata references; `''` takes the
+   * paths literally. See inferRootPackage in convert.js.
+   */
+  rootPackage: null,
+
   schemas: {
     /**
      * Schema qualifiers to strip from generated SQL (checklist items 8/12/23).
@@ -40,9 +48,29 @@ export const DEFAULTS = Object.freeze({
     reservedWords: null, // null = use the scanner's default list
   },
 
+  serviceActions: {
+    /** What a `create using` action answers with. */
+    returnType: 'String',
+    /**
+     * The type of the payload parameter. NEO passed the request body through a
+     * temporary table; CAP passes it as an action parameter, and its *name* is
+     * not configurable — it is the column the handler reads, so that
+     * `req.data.<name>` in the handler and the declaration cannot disagree.
+     */
+    payloadType: 'LargeString',
+  },
+
   cdsProxy: {
     /** HANA -> CDS type map. Overridable per project. */
     typeMap: null, // null = the emitter's default
+    /**
+     * How many files the proxy entities are spread over.
+     *
+     *   null (default)  one `.cds` per calc view, mirroring the NEO folder tree
+     *   'all'           every entity in a single `db/cds/schema.cds`
+     *   'module'        one per top-level module, `db/cds/<MOD>/<MOD>_schema.cds`
+     */
+    bundle: null,
   },
 });
 

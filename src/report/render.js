@@ -304,6 +304,16 @@ export function renderDbScan(s) {
 
 const LEVEL_ORDER = { blocked: 0, warning: 1, note: 2 };
 
+/** Findings grouped by code, commonest first — one entry stands for the group. */
+function byCode(findings) {
+  const groups = new Map();
+  for (const f of findings) {
+    if (!groups.has(f.code)) groups.set(f.code, []);
+    groups.get(f.code).push(f);
+  }
+  return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+}
+
 export function renderConvert(r, { outDir, wrote } = {}) {
   const out = [];
   const rule = '─'.repeat(72);
@@ -347,10 +357,15 @@ export function renderConvert(r, { outDir, wrote } = {}) {
     out.push(`  ${rule}`);
     out.push(`  BLOCKED — ${blocked.length}`);
     out.push('');
-    for (const f of blocked) {
-      out.push(`    ${f.code}`);
-      for (const l of wrap(f.message, 66)) out.push(`      ${l}`);
-      if (f.fix) for (const l of wrap(f.fix, 66)) out.push(`      ${l}`);
+    // Grouped like the warnings below. One cause routinely accounts for
+    // thousands of these — printing every one in full buries the others and
+    // scrolls the summary off the terminal, which is where the reader was
+    // told to look.
+    for (const [code, list] of byCode(blocked)) {
+      out.push(`    ${num(list.length, 4)}  ${code}`);
+      for (const l of wrap(list[0].message, 62)) out.push(`          ${l}`);
+      if (list[0].fix) for (const l of wrap(list[0].fix, 62)) out.push(`          ${l}`);
+      if (list.length > 1) out.push(`          … and ${list.length - 1} more`);
       out.push('');
     }
   }
@@ -359,12 +374,7 @@ export function renderConvert(r, { outDir, wrote } = {}) {
     out.push(`  ${rule}`);
     out.push(`  WARNINGS — ${warnings.length}`);
     out.push('');
-    const byCode = new Map();
-    for (const f of warnings) {
-      if (!byCode.has(f.code)) byCode.set(f.code, []);
-      byCode.get(f.code).push(f);
-    }
-    for (const [code, list] of [...byCode.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    for (const [code, list] of byCode(warnings)) {
       out.push(`    ${num(list.length, 4)}  ${code}`);
       for (const l of wrap(list[0].message, 62)) out.push(`          ${l}`);
       if (list.length > 1) out.push(`          … and ${list.length - 1} more`);

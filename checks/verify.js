@@ -46,8 +46,11 @@ const failures = [];
 function step(label, cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { cwd: repo, encoding: 'utf8', ...opts });
   const output = `${r.stdout || ''}${r.stderr || ''}`;
+  // A check that declines to run must not read as one that ran and passed.
+  const skipped = opts.skipIfMatch?.test(output);
   const ok = r.status === 0 && !opts.mustNotMatch?.test(output);
-  console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}`);
+  console.log(`  ${skipped ? 'SKIP' : ok ? 'PASS' : 'FAIL'}  ${label}${skipped ? `   (${output.trim().replace(/^SKIP\s*/, '')})` : ''}`);
+  if (skipped) return output;
   if (!ok) {
     failures.push(label);
     process.stdout.write(output.split('\n').slice(-25).map((l) => `        ${l}`).join('\n') + '\n');
@@ -76,6 +79,10 @@ step('emitted tree — scope, sentinels, re-parse', process.execPath, ['checks/e
 step('refusal ceilings', process.execPath, ['checks/ceiling.js', ...roots]);
 step('$. leaks — every remaining site has a finding', process.execPath, ['checks/leaks.js', ...roots]);
 step('cross-file awaits — every async call is awaited', process.execPath, ['checks/awaits.js', ...outs]);
+step('procedure names — every CALL resolves to a .hdbprocedure', process.execPath, ['checks/procnames.js', ...outs]);
+step('cds compile — the emitted model, through CAP itself', process.execPath, ['checks/cdscompile.js', ...outs], {
+  skipIfMatch: /^\s*SKIP\b/,
+});
 if (expect) step('score', process.execPath, ['bin/neo2cf.js', 'score', roots[0], '--expect', expect]);
 
 if (build) {

@@ -86,7 +86,7 @@ test('a loop that executes once per iteration keeps its loop', () => {
     }
   }`);
   assert.ok(parses(r.text));
-  assert.match(r.text, /for \(var i = 0; i < rows\.length; i\+\+\) \{/);
+  assert.match(r.text, /for \(let i = 0; i < rows\.length; i\+\+\) \{/);
   assert.match(r.text, /await cds\.run\(`CALL S_P_doIt\(\?\)`, \[rows\[i\]\.ID\]\)/);
 });
 
@@ -129,7 +129,7 @@ test('an unresolved statement keeps its NEO code and says why above it', () => {
   assert.equal(r.skipped, 1);
   assert.match(r.text, /NEEDS HUMAN REVIEW/);
   assert.match(r.text, /SQL_DYNAMIC/);
-  assert.match(r.text, /var p = conn\.prepareStatement\(q\);/);   // untouched
+  assert.match(r.text, /const p = conn\.prepareStatement\(q\);/);   // untouched
   assert.doesNotMatch(r.text, /cds\.run/);
 });
 
@@ -427,4 +427,126 @@ function load(id) {
 }
 `);
   assert.ok(out.findings.some((f) => f.code === 'READ_OUTSIDE_ROW'));
+});
+
+/* ---------------- the SQL string, once its value has moved ---------------- */
+
+test('the SQL string assignment goes with the statement it fed', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query = 'SELECT A FROM "S"."T" WHERE ID = ?';
+  var pstmt = conn.prepareStatement(query);
+  pstmt.setNString(1, id);
+  var rs = pstmt.executeQuery();
+  while (rs.next()) { use(rs.getNString(1)); }
+}
+`);
+  // the whole point: no schema name is left standing in SQL nobody executes
+  assert.ok(!out.text.includes('"S"."T"'), out.text);
+  assert.ok(!/query\s*=/.test(out.text), out.text);
+  assert.ok(parses(out.text));
+});
+
+test('one `query` variable reused by two statements loses both assignments', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query, pstmt, rs;
+  query = 'SELECT A FROM "S"."T1"';
+  pstmt = conn.prepareStatement(query);
+  rs = pstmt.executeQuery();
+  query = 'SELECT B FROM "S"."T2"';
+  pstmt = conn.prepareStatement(query);
+  rs = pstmt.executeQuery();
+}
+`);
+  assert.ok(!out.text.includes('"S"."T1"'), out.text);
+  assert.ok(!out.text.includes('"S"."T2"'), out.text);
+});
+
+test('an assignment whose value something else still reads is kept', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query = 'SELECT A FROM "S"."T"';
+  var pstmt = conn.prepareStatement(query);
+  var rs = pstmt.executeQuery();
+  log(query);
+}
+`);
+  assert.match(out.text, /query = 'SELECT A FROM "S"\."T"'/);
+});
+
+test('a read between the assignment and the prepare keeps it too', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query = 'SELECT A FROM "S"."T"';
+  log(query);
+  var pstmt = conn.prepareStatement(query);
+  var rs = pstmt.executeQuery();
+}
+`);
+  assert.match(out.text, /query = 'SELECT A FROM "S"\."T"'/);
+});
+
+test('a closure could read it at any time, so the assignment stays', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query = 'SELECT A FROM "S"."T"';
+  var pstmt = conn.prepareStatement(query);
+  var rs = pstmt.executeQuery();
+  later(function () { log(query); });
+}
+`);
+  assert.match(out.text, /query = 'SELECT A FROM "S"\."T"'/);
+});
+
+test('a declaration that also declares something else is never deleted', () => {
+  const out = run(`
+function load(id) {
+  var conn = $.db.getConnection();
+  var query = 'SELECT A FROM "S"."T"', rows = [];
+  var pstmt = conn.prepareStatement(query);
+  var rs = pstmt.executeQuery();
+  while (rs.next()) { rows.push(rs.getNString(1)); }
+  return rows;
+}
+`);
+  assert.match(out.text, /rows = \[\]/);
+  assert.ok(parses(out.text));
+});
+
+test('inside a loop the assignment still goes, as long as nothing else reads it', () => {
+  const out = run(`
+function load(ids) {
+  var conn = $.db.getConnection();
+  for (var i = 0; i < ids.length; i++) {
+    var query = 'SELECT A FROM "S"."T" WHERE ID = ?';
+    var pstmt = conn.prepareStatement(query);
+    pstmt.setNString(1, ids[i]);
+    var rs = pstmt.executeQuery();
+  }
+}
+`);
+  assert.ok(!out.text.includes('"S"."T"'), out.text);
+});
+
+test('a loop that reads the name ahead of the assignment keeps it', () => {
+  const out = run(`
+function load(ids) {
+  var conn = $.db.getConnection();
+  var query;
+  for (var i = 0; i < ids.length; i++) {
+    log(query);
+    query = 'SELECT A FROM "S"."T" WHERE ID = ?';
+    var pstmt = conn.prepareStatement(query);
+    pstmt.setNString(1, ids[i]);
+    var rs = pstmt.executeQuery();
+  }
+}
+`);
+  assert.match(out.text, /query = 'SELECT A FROM "S"\."T" WHERE ID = \?'/);
 });

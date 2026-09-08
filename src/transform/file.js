@@ -26,6 +26,7 @@ import {
 import { importEdits, exportBlock, exportedNames } from './imports.js';
 import { requestEdits } from './request.js';
 import { httpEdits } from './http.js';
+import { constifyVars } from './vars.js';
 
 /**
  * @param {string} source
@@ -162,6 +163,22 @@ export function transformFile(source, opts = {}) {
   if (exports) text += exports;
   // A `.xsjs` is one request entry point, and CAP invokes the default export.
   if (req.defaultExport) text += `\nexport default ${req.defaultExport};\n`;
+
+  // ES5 in, modern module out: the `var`s the splice preserved are rewritten now
+  // that the file is whole (transform/vars.js). What it refuses is reported —
+  // `var` surviving in the output is a fact about the NEO code, and silence
+  // reads as the conversion having missed it.
+  const vars = constifyVars(text, { filename: opts.filename });
+  text = vars.text;
+  if (vars.refused.length) {
+    const reasons = [...new Set(vars.refused.map((r) => r.reason))];
+    findings.push({
+      level: 'note',
+      code: 'VAR_KEPT',
+      message: `${vars.refused.length} \`var\` declaration(s) kept — ${reasons.join('; ')}.`,
+      fix: `Lines ${vars.refused.map((r) => r.line).join(', ')}. Rename or move the binding, then change it to \`let\`/\`const\` by hand; converting it as it stands would change what the code does.`,
+    });
+  }
 
   // Read the result back. A conversion that produces something the JavaScript
   // parser rejects is worse than no conversion, and the cheapest place to catch

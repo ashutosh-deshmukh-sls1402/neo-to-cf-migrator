@@ -14,6 +14,7 @@ import { score } from '../score/compare.js';
 import { scanDb, convertFile } from '../src/transform/scan.js';
 import { renderInventory, renderScore, renderConvert, renderDbScan, renderError } from '../src/report/render.js';
 import { resolveBackend } from '../src/ai/backend.js';
+import { formatJs } from '../src/emit/format.js';
 
 const HELP = `
 neo2cf — SAP NEO (XSJS/XSC) -> SAP CF (CAP/Node.js)
@@ -32,6 +33,17 @@ OPTIONS
   --write             actually write (default is a dry run)
   --force             write even with blockers outstanding
   --json              machine-readable output
+  --single-cds        put every CDS proxy entity in one db/cds/schema.cds
+                      instead of one .cds per calc view (the default)
+  --module-cds        one .cds per top-level module instead:
+                      db/cds/<MODULE>/<MODULE>_schema.cds
+  --root-package <p>  package segments above the directory being converted,
+                      when it is a subfolder of the NEO repository (e.g. RSM).
+                      Inferred from the .xsodata references; pass "" to take
+                      the folder paths literally
+  --no-format         skip the final Prettier pass over the emitted .js.
+                      Everything else splices, so without formatting the
+                      output still diffs line-for-line against the NEO source
   --ai <backend>      Tier 2 — ask a model about what Tier 1 refused. Default none.
                         none              deterministic only (the default)
                         claude            the claude CLI, headless (claude -p)
@@ -65,9 +77,12 @@ function parseArgs(argv) {
   return { flags, positional };
 }
 
+/** --single-cds / --module-cds -> cdsProxy.bundle. Neither = one .cds per view. */
+const cdsBundle = (flags) => (flags['module-cds'] ? 'module' : flags['single-cds'] ? 'all' : null);
+
 const list = (v) => (v && v !== true ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : undefined);
 
-function main(argv) {
+async function main(argv) {
   const { flags, positional } = parseArgs(argv);
   const [command, target] = positional;
 
@@ -85,10 +100,33 @@ function main(argv) {
         schema: typeof flags.schema === 'string' ? flags.schema : undefined,
         apps: list(flags.app),
         ai,
+        config: {
+          ...(cdsBundle(flags) ? { cdsProxy: { bundle: cdsBundle(flags) } } : {}),
+          ...(typeof flags['root-package'] === 'string' ? { rootPackage: { package: flags['root-package'] } } : {}),
+        },
       });
+      // Last, after every offset-based pass: Prettier rewrites the whole file.
+      if (!flags['no-format']) {
+        const fmt = await formatJs(r.files);
+        for (const f of fmt.failed) {
+          r.findings.push({
+            level: 'warning', code: 'FORMAT_FAILED', file: f.file,
+            message: `${f.file}: Prettier could not parse the converted file, so it is written unformatted.`,
+            fix: `A file that will not parse here will not run either — ${f.message}`,
+          });
+        }
+      }
       let wrote = null;
+      let refused = null;
       if (flags.write) {
-        wrote = writeFiles(r.files, path.resolve(outDir), path.resolve(target), { force: !!flags.force, blockers: r.stats.blocked });
+        try {
+          wrote = writeFiles(r.files, path.resolve(outDir), path.resolve(target), { force: !!flags.force, blockers: r.stats.blocked });
+        } catch (err) {
+          // The refusal is the guard doing its job, but its message says to go
+          // and read the blockers — so the report has to be printed, not
+          // replaced by the refusal. It follows the report, below.
+          refused = err;
+        }
       }
       const asJson = () =>
         JSON.stringify(
@@ -99,6 +137,7 @@ function main(argv) {
       process.stdout.write(
         flags.json ? asJson() : renderConvert(r, { outDir: outDir ? path.resolve(outDir) : null, wrote }),
       );
+      if (refused) { process.stderr.write(renderError(refused)); return 1; }
       return r.stats.blocked && !flags.force ? 1 : 0;
     } catch (err) { process.stderr.write(renderError(err)); return 1; }
   }
@@ -118,7 +157,10 @@ function main(argv) {
           `\n  ${flags.show}\n  ${r.converted} statement(s) converted, ${r.skipped} left for a human\n` +
             r.notes.map((n) => `  · ${n}\n`).join('') + '\n',
         );
-        process.stdout.write(r.text);
+        // Formatted like `convert` would write it, so the preview is the file.
+        const preview = [{ path: `${flags.show}.js`, text: r.text }];
+        if (!flags['no-format']) await formatJs(preview);
+        process.stdout.write(preview[0].text);
         return 0;
       } catch (err) { process.stderr.write(renderError(err)); return 1; }
     }
@@ -178,4 +220,4 @@ function main(argv) {
   }
 }
 
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2)).then((code) => process.exit(code));

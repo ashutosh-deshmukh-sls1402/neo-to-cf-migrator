@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "acorn": "^8.18.0",
-    "fast-xml-parser": "^5.11.1"
+    "fast-xml-parser": "^5.11.1",
+    "prettier": "^3.9.6"
   }
 }

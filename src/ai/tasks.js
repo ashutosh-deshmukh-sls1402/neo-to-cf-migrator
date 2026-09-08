@@ -15,7 +15,7 @@
  *      whose answer cannot be checked against the SQL or the AST does not
  *      belong here — it belongs in the report, as a refusal.
  *
- * ── the one task ─────────────────────────────────────────────────────────────
+ * ── the tasks ─────────────────────────────────────────────────────────────────
  *
  * `hole-classify`. §20 established that a value spliced into SQL converts three
  * different ways depending on where it sits, and that quote parity decides it:
@@ -33,6 +33,8 @@
  * by the SQL grammar check below; a model that says `unknown` costs us nothing,
  * because `unknown` is where we already were.
  */
+
+import { walk } from '../transform/js.js';
 
 /** Positions where a bind parameter is not legal SQL, whatever the model says. */
 const IDENTIFIER_ONLY = /\b(FROM|JOIN|INTO|UPDATE|TABLE|PROCEDURE|SCHEMA|USER|VIEW|INDEX|SEQUENCE)\s*$/i;
@@ -171,3 +173,94 @@ export const holeClassify = {
 };
 
 export const TASKS = [holeClassify];
+
+/* ─────────────────────────── handler-return ─────────────────────────── */
+
+/**
+ * `handler-return`. An action handler that returns nothing makes CAP answer the
+ * caller with an empty body — the request succeeds and the payload is gone. NEO
+ * sent the answer through `$.response.setBody`, which converts to a `return`;
+ * where NEO never wrote one, there is nothing deterministic to convert.
+ *
+ * Same three rules. The model does not write a return statement — it picks ONE
+ * NAME from a list this tool computed from the AST (`src/emit/returns.js`), and
+ * that file writes the `return`. The check is semantic: the name must be a
+ * binding still in scope at the end of the function *and* have a value written
+ * to it there. A parameter is refused outright — a handler answering with its
+ * own `req` is never right, however confident the model is.
+ */
+const RETURN_PROMPT = `You are converting SAP HANA XS Classic (NEO) JavaScript to SAP CAP.
+
+This function serves a CAP action, so whatever it returns is what the service
+sends back to the caller. It currently returns nothing, which means the caller
+gets an empty response.
+
+Which of the listed variables holds the result this function was computing —
+the value that should go back to the caller?
+
+Rules:
+- Answer with one name from the list, exactly as spelled, or "unknown".
+- "unknown" is the correct answer whenever you are not sure, and when no
+  listed variable is the result (logging, a counter, a loop index). The
+  function is then left as it is, which is where it already is.
+- Reply with JSON only, no prose, no markdown fence:
+  {"variable":"oResult"}   or   {"variable":"unknown"}
+`;
+
+export const handlerReturn = {
+  name: 'handler-return',
+
+  prompt({ fn, name, text, candidates }) {
+    return [
+      RETURN_PROMPT,
+      '--- FACTS ---',
+      '',
+      `The function, verbatim (from ${name}):`,
+      '',
+      text.slice(fn.start, fn.end),
+      '',
+      'The variables in scope where the return would go:',
+      ...candidates.map((c) => `  ${c}`),
+      '',
+      '--- ANSWER (JSON) ---',
+    ].join('\n');
+  },
+
+  parse(raw) {
+    const text = String(raw).replace(/```(?:json)?/g, '');
+    const at = text.indexOf('{');
+    if (at === -1) return null;
+    try {
+      return JSON.parse(text.slice(at, text.lastIndexOf('}') + 1));
+    } catch {
+      return null;
+    }
+  },
+
+  /** @returns {{variable:string}|{}|{reject:string}} — `{}` is the model's own `unknown`. */
+  validate(answer, { fn, candidates }) {
+    if (!answer || typeof answer.variable !== 'string') return { reject: 'the answer is not {"variable":"…"}' };
+    const name = answer.variable.trim();
+    if (name === 'unknown') return {};
+    // The parameter check comes first only so the refusal says why: `req` is the
+    // most tempting wrong answer here, and it is never the right one.
+    if (fn.params.some((p) => p.type === 'Identifier' && p.name === name)) {
+      return { reject: `"${name}" is a parameter of this function, not a result it computed` };
+    }
+    if (!candidates.includes(name)) return { reject: `"${name}" is not one of the listed variables` };
+    if (!isWritten(fn, name)) return { reject: `nothing ever assigns a value to "${name}", so returning it returns undefined` };
+    return { variable: name };
+  },
+};
+
+/** Is a value ever written to this name inside the function? */
+function isWritten(fn, name) {
+  const hits = (target) => target && target.type === 'Identifier' && target.name === name;
+  let written = false;
+  walk(fn.body, (n) => {
+    if (n.type === 'VariableDeclarator' && hits(n.id) && n.init) written = true;
+    else if (n.type === 'AssignmentExpression' && hits(n.left)) written = true;
+    else if (n.type === 'UpdateExpression' && hits(n.argument)) written = true;
+  });
+  return written;
+}

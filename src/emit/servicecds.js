@@ -27,6 +27,7 @@
  */
 
 import path from 'node:path';
+import { cdsIdent } from '../core/naming.js';
 
 /**
  * Service names, made unique across the whole tree.
@@ -161,7 +162,7 @@ function renderAssociation(nav, assoc, warnings, naming = 'navigation-alias') {
  * @param {string} opts.serviceDir     absolute dir the service.cds will live in
  * @param {Function} opts.resolveProxy (namespace, entity) => {name, file} | null
  * @param {string} [opts.neoSource]    provenance path for the header comment
- * @param {Function} [opts.buildAction] (entity) => {decl} — supplied by the rule
+ * @param {Function} [opts.payloadParam] (entity) => the column its handler reads, for the cross-check
  * @returns {{text:string, warnings:string[], stats:object, unresolved:object[]}}
  */
 function generateServiceBlock(parsed, cfg, opts) {
@@ -171,6 +172,7 @@ function generateServiceBlock(parsed, cfg, opts) {
   const usings = new Map();       // proxy name -> specifier
   const body = [];
   const actions = [];
+  const actionParams = [];
 
   const assocByName = new Map((parsed.associations || []).map((a) => [a.name, a]));
   const naming = cfg.serviceGenerate?.associationNaming || 'navigation-alias';
@@ -179,11 +181,32 @@ function generateServiceBlock(parsed, cfg, opts) {
   for (const ent of parsed.entities || []) {
     // A create-using entity is a write endpoint: action only, no projection, no using.
     if (ent.createUsing) {
-      const built = opts.buildAction ? opts.buildAction(ent) : null;
+      // NEO handed the exit its input through a temporary table, and `with(…)`
+      // is that table's column list — which on a create-using entity is the
+      // action's parameter list, not a projection. The `key(…)` column is the
+      // temporary table's own key rather than an input, so it comes back out:
+      //
+      //     with("PAYLOAD","COL") key("COL")   ->   action X(PAYLOAD: LargeString)
+      //
+      // Declaring nothing, as this did before, leaves the handler reading
+      // `req.data.PAYLOAD` from a request CAP never put it on.
+      const keys = new Set(ent.keys || []);
+      const params = (ent.with || []).filter((c) => !keys.has(c));
+      // …except that 19 of ICBC's create-using entities carry no `with(…)` at
+      // all, only a key, while their handler still reads a payload. The
+      // .xsodata is the declaration; the handler is what actually runs, so the
+      // column it reads is added when the clause does not already name it.
+      const fromHandler = opts.payloadParam ? opts.payloadParam(ent) : null;
+      const added = fromHandler && !params.includes(fromHandler) ? fromHandler : null;
+      if (added) params.push(added);
+      const type = cfg.serviceActions?.payloadType ?? 'LargeString';
       actions.push(
-        built?.decl ||
-        `action ${ent.alias}() returns ${cfg.serviceActions?.returnType ?? 'String'};`
+        `action ${ent.alias}(${params.map((p) => `${cdsIdent(p)}: ${type}`).join(', ')}) ` +
+        `returns ${cfg.serviceActions?.returnType ?? 'String'};`,
       );
+      // The handler is the other half of this: it reads `req.data.<column>`.
+      // The caller checks the two agree — see ACTION_PAYLOAD_MISSING.
+      actionParams.push({ alias: ent.alias, params, added, createUsing: ent.createUsing });
       continue;
     }
 
@@ -236,7 +259,7 @@ function generateServiceBlock(parsed, cfg, opts) {
     // key is restated here from the `key(…)` this .xsodata declares.
     const keys = new Set((ent.keys || []).map((k) => String(k).toUpperCase()));
     const members = [
-      ...(selected || ['*']).map((c) => (keys.has(String(c).toUpperCase()) ? `key ${c}` : c)),
+      ...(selected || ['*']).map((c) => (keys.has(String(c).toUpperCase()) ? `key ${cdsIdent(c)}` : cdsIdent(c))),
       ...navs,
     ];
 
@@ -292,6 +315,7 @@ function generateServiceBlock(parsed, cfg, opts) {
     warnings,
     unresolved,
     droppedColumns,
+    actionParams,
     stats: {
       entities: (parsed.entities || []).length,
       projected: (parsed.entities || []).length - actions.length - unresolved.length,

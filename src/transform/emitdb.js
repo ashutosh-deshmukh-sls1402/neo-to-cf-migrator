@@ -20,11 +20,12 @@
  * is what makes the output diffable against the NEO file it came from.
  */
 
-import { parse, parentMap, walk, applyEdits } from './js.js';
+import { parse, parentMap, walk, applyEdits, enclosingFunction } from './js.js';
 import { analyseDb, HOLE, renderValueTree } from './db.js';
 import { aiRepair } from '../ai/index.js';
 import { stripSchemaQualifiers, replaceInCode } from '../parse/sqlscript.js';
 import { flattenCallPath } from '../core/naming.js';
+import { classifyAfterTable, afterTableEdits } from './aftertable.js';
 
 /** Connection and cursor housekeeping CAP does for you. */
 const CLEANUP_METHODS = new Set(['close', 'commit', 'rollback', 'setAutoCommit']);
@@ -121,7 +122,7 @@ export function cfSql(sql, { schema, cfg = {} } = {}) {
     if (r.stripped.length) notes.push(`stripped ${r.stripped.length} schema qualifier(s)`);
   }
 
-  const su = replaceInCode(out, /\bSESSION_USER\b/g, cfg.generation?.sessionUserReplacement || "SESSION_CONTEXT('APPLICATIONUSER')");
+  const su = replaceInCode(out, /\bSESSION_USER\b/g, cfg.generator?.sessionUserReplacement || "SESSION_CONTEXT('APPLICATIONUSER')");
   out = su.sql;
   if (su.count) notes.push(`replaced SESSION_USER (${su.count})`);
 
@@ -154,6 +155,9 @@ function renderBinds(binds, indent) {
 
 function chainEdits(chain, ctx) {
   const { source, parents, opts, render } = ctx;
+  // The payload in and the answer out are the same JDBC chains as any other,
+  // but CAP has no table for them to go through — see transform/aftertable.js.
+  if (chain.afterTable) return afterTableEdits(chain, ctx);
   const edits = [];
   const notes = [];
   const { nodes } = chain;
@@ -258,10 +262,7 @@ ${anchorIndent}`,
   // 3. The variable that held the SQL, if nothing else reads it. Only a plain
   //    variable — proving an object property is unread would need escape
   //    analysis, so those assignments stay put.
-  if (chain.sql.assign && chain.sql.varName && !chain.sql.varName.includes('.') &&
-      !ctx.readElsewhere(chain.sql.varName, chain.sql.assign, nodes.create)) {
-    drop(chain.sql.assign);
-  }
+  if (ctx.sqlAssignIsDead(chain)) drop(chain.sql.assign);
 
   // 4. The cursor becomes an array, so the row walk becomes a loop over it.
   //    The reads themselves were computed in the first pass — see rowRewrites.
@@ -288,6 +289,14 @@ function rowRewrites(chains, nameTaken) {
   const edits = [];
   for (const chain of chains) {
     if (!chain.resolved) continue;
+    // The payload row is the request, so its columns are read off `req.data`
+    // and there is no result set to name a loop variable for.
+    if (chain.afterTable?.kind === 'read') {
+      for (const r of chain.reads) {
+        edits.push({ start: r.node.start, end: r.node.end, text: `${chain.afterTable.requestVar}.data.${r.column ?? chain.afterTable.column}` });
+      }
+      continue;
+    }
     // A result set can be held on an object (`param.rs`), which is a fine
     // expression but not a name — the loop variable takes just its last segment.
     if (chain.shape === 'loop') chain.rowVar = nameTaken(`${chain.resultVar.split('.').pop()}Row`);
@@ -423,20 +432,99 @@ export function dbEdits(ctx) {
   const ai = opts.ai ? aiRepair(first.chains, ctx, opts.ai) : null;
   const chains = ai ? ai.chains : first.chains;
 
-  /** Is `name` read anywhere other than its own assignment and the prepare call? */
-  const readElsewhere = (name, assignNode, createNode) => {
-    let found = false;
-    walk(ast, (n) => {
-      if (found || n.type !== 'Identifier' || n.name !== name) return;
-      if (within(n, assignNode) && n !== assignNode.id && n !== assignNode.left) return;
-      if (n === assignNode.id || n === assignNode.left) return;
-      if (within(n, createNode)) return;
-      // A bare `var q;` declaration is not a read.
-      const p = parents.get(n);
-      if (p && p.type === 'VariableDeclarator' && p.id === n && !p.init) return;
-      found = true;
+  // The after-table idiom is recognised before anything is rendered: it changes
+  // what a column read becomes, and those are settled for the whole file at once.
+  classifyAfterTable(chains, { ast, parents, statementOf });
+
+  /**
+   * Is the SQL variable's assignment dead, now that its value has moved into
+   * the `cds.run` call?
+   *
+   * `readElsewhere` asks about the *name*, and in this corpus one `query`
+   * variable serves every statement in a function — so it always answered yes,
+   * and 1,046 assignments stayed behind on the ADC corpus alone: SQL that is
+   * built, still naming the schema this migration exists to remove, and never
+   * executed. This asks about the *assignment* instead.
+   *
+   * Sound rather than clever. It only answers yes when both statements sit in
+   * one statement list with no loop around them — so source order is execution
+   * order — and then only when nothing mentions the name between them, nothing
+   * mentions it inside the consuming statement other than the call itself,
+   * nothing mentions it after them before a plain reassignment, and no nested
+   * function mentions it at all. Anything less obvious keeps its assignment.
+   */
+  const sqlAssignIsDead = (chain) => {
+    const { assign, varName } = chain.sql;
+    if (!assign || !varName || varName.includes('.')) return false;
+    const stmt = statementOf(assign, parents);
+    const createStmt = statementOf(chain.nodes.create, parents);
+    if (!stmt || !createStmt) return false;
+    // `var query = '…', rows = [];` — deleting the statement would take `rows`.
+    if (stmt.type === 'VariableDeclaration' && stmt.declarations.length !== 1) return false;
+
+    const holder = parents.get(stmt);
+    const list = holder && (holder.type === 'SwitchCase' ? holder.consequent : holder.body);
+    if (!Array.isArray(list)) return false;
+    const i = list.indexOf(stmt);
+    if (i < 0) return false;
+    let j = -1;
+    for (let k = i + 1; k < list.length; k++) if (within(createStmt, list[k])) { j = k; break; }
+    if (j < 0) return false;
+
+    /**
+     * Is the name *read* here? Only a read can observe the value this
+     * assignment put there — a declaration or another plain assignment to it
+     * cannot, and both are everywhere in this corpus: one `var … query, pstmt …`
+     * list at the top of the function, then a fresh `query = …` per statement.
+     */
+    const mentions = (node, except) => {
+      let found = false;
+      walk(node, (n) => {
+        if (found || n.type !== 'Identifier' || n.name !== varName) return;
+        if (except && within(n, except)) return;
+        const p = parents.get(n);
+        // A property name or an object key is not this binding at all.
+        if (p && p.type === 'MemberExpression' && p.property === n && !p.computed) return;
+        if (p && p.type === 'Property' && p.key === n && !p.computed) return;
+        // Written, not read. `query += …` reads first, so it is not excluded.
+        if (p && p.type === 'VariableDeclarator' && p.id === n) return;
+        if (p && p.type === 'AssignmentExpression' && p.left === n && p.operator === '=') return;
+        found = true;
+      });
+      return found;
+    };
+    /** `query = …;` on its own, so it certainly overwrites what came before. */
+    const overwrites = (s) =>
+      s.type === 'ExpressionStatement' && s.expression.type === 'AssignmentExpression' &&
+      s.expression.operator === '=' && s.expression.left.type === 'Identifier' &&
+      s.expression.left.name === varName;
+
+    for (let k = i + 1; k < j; k++) if (mentions(list[k])) return false;
+    if (mentions(list[j], chain.nodes.create)) return false;
+    for (let k = j + 1; k < list.length; k++) {
+      if (overwrites(list[k])) break;
+      if (mentions(list[k])) return false;
+    }
+
+    // A loop around the pair makes "after" wrap back round to "before": a
+    // statement ahead of the assignment reads the previous iteration's value.
+    // Allowed only when nothing anywhere in that loop mentions the name outside
+    // the window between the two statements.
+    let loop = null;
+    for (let n = holder; n && !/Function/.test(n.type); n = parents.get(n)) {
+      if (/^(While|DoWhile|For|ForIn|ForOf)Statement$/.test(n.type)) loop = n;
+    }
+    if (loop && mentions(loop, { start: list[i].start, end: list[j].end })) return false;
+
+    // A closure can read it at any time, so order proves nothing there.
+    const fn = enclosingFunction(assign, parents);
+    let captured = false;
+    walk(fn ?? ast, (n) => {
+      if (captured || n === fn || !isFunction(n)) return;
+      if (mentions(n)) captured = true;
+      return false;
     });
-    return found;
+    return !captured;
   };
 
   // Pass 1: name the row variables and settle every column read in the file.
@@ -461,7 +549,7 @@ export function dbEdits(ctx) {
   };
 
   // Pass 2: everything else.
-  const chainCtx = { source, parents, opts, render, readElsewhere };
+  const chainCtx = { source, parents, opts, render, sqlAssignIsDead, nameTaken, statementOf, removalEdit, indentOf };
   const edits = [...reads];
   const notes = [];
   let converted = 0;

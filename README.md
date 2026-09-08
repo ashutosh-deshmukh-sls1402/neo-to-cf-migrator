@@ -11,9 +11,11 @@ node bin/neo2cf.js dbscan    <neo-dir>                    # how much .xsjs DB ac
 node bin/neo2cf.js dbscan    <neo-dir> --show <rel-path>  # convert one file and print it
 node bin/neo2cf.js convert   <neo-dir> -o <out> --write   # dry run without --write
 node bin/neo2cf.js score     <neo-dir> --expect <cf-dir>  # score against a hand-migrated tree
+node bin/neo2cf.js convert   <neo-dir> -o <out> --write --module-cds  # one .cds per module
 node bin/neo2cf.js convert   <neo-dir> -o <out> --write --ai claude   # + Tier 2
-node test/run.js                                          # 264 tests
+node test/run.js                                          # 345 tests
 npm run verify -- <neo-dir> --cds <path-to-cds>            # the whole sweep, incl. cds build
+
 ```
 
 **Status: every artifact type converts.** `.calculationview`, `.hdbprocedure`
@@ -116,7 +118,7 @@ checks/              verify.js  (THE SWEEP — everything below, plus cds build)
                      leaks.js   (what is left of the $. surface),
                      awaits.js  (every cross-file async call is awaited),
                      emitted.js (scope / sentinel / re-parse over an out-dir)
-test/                264 tests, no framework
+test/                345 tests, no framework
 ```
 
 Several modules are ported from `C:\Sodales\Tools\migration-cleanup-toolkit`

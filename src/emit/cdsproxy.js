@@ -32,14 +32,25 @@
  * DATE, VARCHAR, DOUBLE and TIMESTAMP occur in NEO (18 / 12 / 7 / 1 columns) but never
  * in a shipped proxy, so their mapping is CAP's documented HANA equivalence rather than
  * observed precedent. They are marked as such in the config so the distinction survives.
+ *
+ * NCLOB was the third kind of entry, and the one that bit: neither observed nor
+ * documented, but assumed by symmetry with CLOB -> hana.CLOB. There is no
+ * `cds.hana.NCLOB`, and the compiler says so — `Artifact "cds.hana.NCLOB" has
+ * not been found` — exactly as it once did for the invented `Integer16`. The
+ * CDS type for an NCLOB column is `LargeString`, which CAP compiles back to
+ * NCLOB on HANA, so the deployed column is unchanged. Twice now a type has only
+ * had to *look* right to get in here; `test/cdsproxy.test.js` now checks every
+ * value in this map against the list `@sap/cds-compiler` actually accepts.
  */
+
+import { cdsIdent } from '../core/naming.js';
 
 /** HANA datatype -> CDS type. Overridable via `cdsProxy.typeMap` in project config. */
 const DEFAULT_TYPE_MAP = Object.freeze({
   NVARCHAR: 'String',
   VARCHAR: 'String',
   CLOB: 'hana.CLOB',
-  NCLOB: 'hana.NCLOB',
+  NCLOB: 'LargeString',
   INTEGER: 'Integer',
   BIGINT: 'Integer64',
   SMALLINT: 'Int16',
@@ -55,7 +66,7 @@ const DEFAULT_TYPE_MAP = Object.freeze({
 });
 
 /** Types that never carry a length, even when NEO records one. */
-const NO_LENGTH = new Set(['Integer', 'Integer64', 'Int16', 'Double', 'Date', 'Time', 'Timestamp', 'Boolean', 'hana.CLOB', 'hana.NCLOB', 'hana.TINYINT']);
+const NO_LENGTH = new Set(['Integer', 'Integer64', 'Int16', 'Double', 'Date', 'Time', 'Timestamp', 'Boolean', 'LargeString', 'hana.CLOB', 'hana.TINYINT']);
 
 /**
  * Render one HANA attribute as a CDS type.
@@ -126,7 +137,8 @@ function generateProxy(cv, cfg, opts = {}) {
     if (warning) warnings.push(warning);
     if (!type) continue;                       // skip rather than emit a wrong column
     const isKey = keySet.has(String(a.id).toUpperCase());
-    cols.push({ label: isKey ? `key ${a.id}` : a.id, type, id: a.id });
+    const ident = cdsIdent(a.id);
+    cols.push({ label: isKey ? `key ${ident}` : ident, type, id: a.id });
   }
 
   const padName = pad(cols.map((c) => c.label));
@@ -150,7 +162,7 @@ function generateProxy(cv, cfg, opts = {}) {
   const params = (cv.parameters || []).map((p) => {
     const { type, warning } = cdsType(p, typeMap);
     if (warning) warnings.push(`parameter ${warning}`);
-    return `${p.id} : ${type || 'String'}`;
+    return `${cdsIdent(p.id)} : ${type || 'String'}`;
   });
   const signature = params.length ? ` (${params.join(', ')})` : '';
 

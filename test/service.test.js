@@ -58,7 +58,7 @@ test('item 7b — the event name is the alias, never the literal CREATE', () => 
 });
 
 test('item 14 — req is passed straight through to the Library entry function', () => {
-  assert.match(gen().text, /srv\.on\('aliasWrite', async \(req\) => await doThing\(req\)\);/);
+  assert.ok(gen().text.includes("srv.on('aliasWrite', async (req) => { return await doThing(req); });"), gen().text);
 });
 
 test('item 7a — ES import, never require()', () => {

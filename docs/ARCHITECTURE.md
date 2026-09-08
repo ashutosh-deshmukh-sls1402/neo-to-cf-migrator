@@ -61,15 +61,22 @@ src/transform/  the JavaScript tier — one NEO .xsjs/.xsjslib in, one CF handle
   imports.js      $.import + its reference → one ES import
   request.js      $.request / $.response / $.session, the entry function, the export
   http.js         $.net.http / $.web.WebRequest → executeHttpRequest
+  aftertable.js   param.afterTableName → req.data.<COL> in, return out
+  vars.js         var → const/let, scope-resolved, over the finished text
 
 src/emit/       data → CF file text
   hdbfunction.js  TABLE_FUNCTION_*.hdbfunction from the calc view's SQLScript
   hdbcalcview.js  .hdbcalculationview — a projection over that function
+  hdbprocedure.js .hdbprocedure — the declared name flattened, schema removed
   cdsproxy.js     db/cds/*.cds — the CAP entity over the deployed view
+                  (one per view; --single-cds bundles all, --module-cds one
+                  per top-level module — cdsProxy.bundle, resolved in layout.js)
   servicecds.js   service.cds from the .xsodata
   servicejs.js    service.js — the handler wiring
   project.js      package.json, mta.yaml, srv/index.cds, xs-security.json, db/
   awaits.js       cross-file await propagation over the whole emitted tree
+  returns.js      action handlers that answer nothing (finding, or Tier 2)
+  format.js       Prettier over the emitted .js, last of all (--no-format)
 
 src/ai/         Tier 2 — the only non-deterministic code in the tool
   backend.js      the only subprocess: --ai claude | cmd:<runner>
@@ -78,7 +85,7 @@ src/ai/         Tier 2 — the only non-deterministic code in the tool
 
 src/report/render.js   every line of terminal output
 checks/                measurements that need a real corpus (§7)
-test/                  264 tests, no framework
+test/                  345 tests, no framework
 ```
 
 ---
@@ -101,7 +108,10 @@ neo2cf convert <neo-dir> -o out --write
   PHASE C ── emit file text, artifact by artifact
         │
         ▼
-  WHOLE-TREE ── cross-file awaits, then the project shell
+  WHOLE-TREE ── handler returns, cross-file awaits, then the project shell
+        │
+        ▼
+  FORMAT ── Prettier over every emitted .js   (--no-format skips)
         │
         ▼
   WRITE ── guards, then files land in out/
@@ -139,6 +149,16 @@ mean either a missing key or a forward reference.
 
 ### Phase B — resolve names
 
+First, **where this tree sits in the repository**. A `.xsodata` names views by
+full package path, so converting a subfolder leaves every reference unresolvable
+— 1,809 blockers on ADC/ARBDR, every one of them blaming a module that was never
+the problem. `inferRootPackage` reads the missing prefix back off the references
+(a reference resolves once some leading run of its segments is dropped; what was
+dropped is what sits above this directory) and `repoPath` puts it in front of
+every path handed to `targetsFor` and `transformFile`. Inference only runs when
+*no* reference resolves as-is, so a whole-tree run never reaches it.
+
+
 Calc views get their CF identity: the flattened entity name
 (`TECK.JB.Views::V` → `TECK_JB_VIEWS_V`), the table-function name, and the
 `db/cds` file path. These go into a `proxies` map keyed by the NEO id
@@ -150,7 +170,8 @@ the corpus is *not* the scenario id inside the XML.
 | NEO input | CF output | Emitter |
 |---|---|---|
 | `.calculationview` | `db/src/…/X.hdbcalculationview` (a projection) + `db/src/…/TABLE_FUNCTION_X.hdbfunction` (the SQLScript) + `db/cds/…/ENTITY.cds` (the CAP proxy) | `hdbcalcview`, `hdbfunction`, `cdsproxy` |
-| `.hdbprocedure` | `db/src/…/same-name` — copied, with the same SQL hygiene | inline |
+| `.xsodata` `create using` | an `action` in the `service.cds`, its parameters the `with(…)` columns minus the `key(…)` ones, plus whatever column the handler reads | `servicecds` |
+| `.hdbprocedure` | `db/src/…/same-name` — the declared name flattened, `DEFAULT SCHEMA` dropped, schema qualifiers stripped, `SESSION_USER` replaced | `hdbprocedure` |
 | `.xsodata` | `srv/lib/<SCHEMA>/…/service.cds` + `service.js` | `servicecds`, `servicejs` |
 | `.xsjs` / `.xsjslib` | `srv/lib/<SCHEMA>/…/handlers/X.js` | `transform/file.js` |
 
@@ -167,19 +188,61 @@ colliding names are qualified by the first differing folder segment.
 
 ### Whole-tree passes
 
-Two things are impossible to see one file at a time, so they run after
+Three things are impossible to see one file at a time, so they run after
 everything is emitted:
 
-1. **`emit/awaits.js`** — cross-file `await`. The per-file pass makes a function
+1. **`emit/returns.js`** — what each action answers with. `service.js` wires
+   `srv.on(alias, async (req) => { return await fn(req); })`, so whatever the
+   handler returns is what CAP sends. `$.response.setBody` converts to a
+   `return`; a NEO handler that never called it converts into one that resolves
+   to `undefined`, and CAP serves that as an empty 200 — the request succeeds
+   and the payload is gone. 103 handlers on the TECK corpus. Which function is a
+   handler comes from the `.xsodata`, not the file, so only `convert` can ask.
+   Tier 1 reports it (`HANDLER_NO_RETURN`); with `--ai`, the `handler-return`
+   task asks a model to pick one name from the variables this pass computed as
+   still in scope at the closing brace, and *this* code writes the `return`.
+
+2. **`emit/awaits.js`** — cross-file `await`. The per-file pass makes a function
    `async` and can only print "callers in other files must await these". This
    builds one call graph over the whole emitted tree, runs a fixed point (a call
    to an async function needs `await` → its container is async → so are *its*
    callers), splices the edits, and re-parses every file it touched. On the two
    corpora it added 1,275 awaits. Without it they were 1,275 latent
    fail-silently bugs.
-2. **`emit/project.js`** — the project shell, last because what it declares
+3. **`emit/project.js`** — the project shell, last because what it declares
    depends on what the run produced (the destination service only exists if a
    destination call was actually converted).
+
+`emit/format.js` runs after all three, in the CLI rather than in `convert` —
+Prettier's API is async and `convert` is not. It is the one pass that rewrites
+whole files instead of splicing, so it has to be last, and `--no-format` turns
+it off for when a line-for-line diff against the NEO original matters more.
+
+### `transform/aftertable.js` — the payload idiom
+
+An `.xsodata` "create using" exit is not handed the request body. NEO gives it a
+temporary table, names it on `param.afterTableName`, and the handler reads the
+payload out with a `SELECT` and writes its answer back with an `UPDATE`. CAP has
+neither — the payload is on the request and the answer is the return value — so
+converted literally the handler queries a table that does not exist and answers
+with an empty body.
+
+This is not a separate pass: `db.js` already resolves those two statements as
+ordinary JDBC chains, with the SQL folded, the interpolated table name located
+and the column reads named. `aftertable.js` recognises exactly two of those SQL
+shapes and renders them differently. The request object is *read off the chain*
+— the interpolated hole traces to `<name>.afterTableName`, and `<name>` is the
+parameter `service.js` passes `req` into — so nothing about it is guessed.
+
+The write is only turned into a `return` where nothing runs after it, checked
+out to the function body rather than the immediate siblings (the write usually
+sits inside an `if`). Otherwise the value is held in a `let` and returned where
+the function ends, which is what the after table was doing: the framework read
+it once, at the end. A `while (rs.next())` over the payload table, or a
+multi-column read of it, is left to the ordinary conversion.
+
+Corpus-wide: 1,354 statements. On ADC/ARBDR it took `HANDLER_NO_RETURN` from 359
+to 4 and `SQL_IDENTIFIER_INTERPOLATED` from 937 to 82.
 
 ### Write — `core/write.js`
 
@@ -198,7 +261,7 @@ source — and they are spliced together at the end.
 ### Pass order, and why it is not arbitrary
 
 ```
-imports  →  request  →  http  →  db  →  (async)  →  applyEdits  →  re-parse
+imports  →  request  →  http  →  db  →  (async)  →  applyEdits  →  vars  →  re-parse
 ```
 
 A pass that **moves** text must run after the passes that rewrite *inside* what
@@ -243,6 +306,32 @@ have. `checks/ceiling.js` tells you what fixing any one of them is *worth*.
 Takes a resolved chain and produces the edits. It never re-derives a column name
 or a bind order. If `db.js` did not resolve a chain, this leaves the NEO code
 exactly as it found it under a `NEEDS HUMAN REVIEW` banner listing every reason.
+
+### `vars.js` — `var` → `const`/`let`
+
+The one pass that does **not** join the splice. XSJS is ES5, so every declaration
+arrives as a `var`, and a CF handler that still says `var` reads as a conversion
+that stopped halfway. But `var` keywords sit inside the ranges `http` and `db`
+move and delete, so a rewrite mixed in with those would collide with them for no
+gain. `vars.js` therefore runs *after* `applyEdits`, re-parses the finished text,
+and rewrites it directly — one extra parse in exchange for the whole class of
+overlap.
+
+`var` is function-scoped and hoisted; `const`/`let` are block-scoped with a
+temporal dead zone. The pass resolves scopes rather than matching names, because
+matching names is wrong in the common case: counting a name file-wide refused
+1,036 of Corpus A's 1,090 declarations, since two functions that both say
+`var dest` are two bindings, not a redeclaration. A declaration is rewritten only
+where the difference provably cannot show — bound exactly once in its function,
+never read outside the block it sits in, never read above the line declaring it —
+and `const` only when every declarator has a value and nothing assigns to it
+again.
+
+What it refuses keeps its `var` and gets a `VAR_KEPT` note naming the lines and
+the rule, because `var` surviving in the output is a fact about the NEO code and
+silence would read as the conversion having missed it. 327 declarations survive
+on Corpus A, all of them hoisting the output cannot preserve — typically a `try`
+block's variable read from the `catch`.
 
 ### The re-parse gate
 
@@ -311,8 +400,8 @@ One command, ten steps, non-zero exit if any fails:
 npm run verify -- <neo-dir> [<neo-dir> …] --expect <hand-migrated-cf> --cds <path-to-cds>
 ```
 
-It runs the tests, converts each corpus, then five checks that need no reference
-tree:
+It runs the tests, converts each corpus, then seven checks that need no
+reference tree:
 
 | Check | Asks |
 |---|---|
@@ -320,6 +409,8 @@ tree:
 | `checks/leaks.js` | what is left of the `$.` surface, and **does every remaining site sit in a file that carries a finding** |
 | `checks/awaits.js` | is every cross-file call to an async function awaited |
 | `checks/ceiling.js` | what is each refusal actually worth (chains where it is the *only* blocker) |
+| `checks/procnames.js` | does every `CALL` in the emitted JS name a `.hdbprocedure` the same run emitted |
+| `checks/cdscompile.js` | does the emitted `.cds` model compile — CAP's own compiler, SKIPped when `@sap/cds-compiler` is not installed |
 | `cds build --production` | **the only real oracle** — what CAP itself accepts |
 
 The last one has found defects nothing else could see, five of them the first

@@ -118,7 +118,7 @@ function processRequest() {
 }
 processRequest();
 `);
-  assert.match(out.text, /var o = req\.data;/);
+  assert.match(out.text, /const o = req\.data;/);
   assert.doesNotMatch(out.text, /JSON\.parse/);
 });
 

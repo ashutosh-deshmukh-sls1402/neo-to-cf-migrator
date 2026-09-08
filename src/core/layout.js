@@ -36,15 +36,34 @@ function withoutApp(relDir, app) {
 }
 
 /**
+ * Where a calc view's CDS proxy lands.
+ *
+ * One file per view mirrors the NEO tree and is the default. Bundling collapses
+ * them — the entity names already carry their container, so nothing collides
+ * when they share a file.
+ */
+function cdsPath(bundle, dbDir, entityName) {
+  if (bundle === 'all') return 'db/cds/schema.cds';
+  if (bundle === 'module') {
+    // The module is the top folder of the db path — HRS, INC, MTG. A view at
+    // the root of the tree has none, so it falls back to the shared file.
+    const mod = dbDir.split('/').filter(Boolean)[0];
+    return mod ? `db/cds/${mod}/${mod}_schema.cds` : 'db/cds/schema.cds';
+  }
+  return join('db/cds', dbDir, `${entityName}.cds`);
+}
+
+/**
  * @param {object} args
  * @param {string} args.relPath  file path relative to the NEO root, posix-style
  * @param {string} args.kind     from artifacts.js
  * @param {string} args.schema   e.g. "TECK"
  * @param {string|null} args.app e.g. "JOB_BIDDING", or null if none
  * @param {string} [args.entityName] flattened entity name, for the cds proxy
+ * @param {string|null} [args.cdsBundle] null | 'all' | 'module' — see cdsPath
  * @returns {{path:string, role:string}[]} every file this NEO file becomes
  */
-export function targetsFor({ relPath, kind, schema, app, entityName }) {
+export function targetsFor({ relPath, kind, schema, app, entityName, cdsBundle }) {
   const dir = posix(path.dirname(relPath));
   const base = path.basename(relPath);
   const stem = base.slice(0, base.lastIndexOf('.'));
@@ -55,7 +74,7 @@ export function targetsFor({ relPath, kind, schema, app, entityName }) {
       return [
         { path: join('db/src', dbDir, `${stem}.hdbcalculationview`), role: 'calcview' },
         { path: join('db/src', dbDir, `TABLE_FUNCTION_${stem}.hdbfunction`), role: 'tablefunction' },
-        { path: join('db/cds', dbDir, `${entityName || stem}.cds`), role: 'cdsproxy' },
+        { path: cdsPath(cdsBundle, dbDir, entityName || stem), role: 'cdsproxy' },
       ];
     }
 
