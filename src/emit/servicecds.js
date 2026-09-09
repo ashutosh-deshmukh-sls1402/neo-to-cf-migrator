@@ -14,6 +14,7 @@
  *   using … from '…'                        entity namespace -> proxy name + path
  *   service X @(path:'/X')                  .xsodata filename (+ role suffix)
  *   entity A as projection on P             entity + alias
+ *   entity A(P:T) as projection on X(P::P)  entity + alias + the calc view's own parameter(s)
  *   @readonly                               create/update/delete forbidden
  *   association to many B on B.C = $self.C  navigates(...) + association principal/dependent
  *   action A(PAYLOAD : LargeString)         create using
@@ -28,53 +29,39 @@
 
 import path from 'node:path';
 import { cdsIdent } from '../core/naming.js';
+import { cdsType, DEFAULT_TYPE_MAP } from './cdsproxy.js';
 
 /**
- * Service names, made unique across the whole tree.
+ * Service names, exactly as NEO named them.
  *
  * A NEO service is identified by its *path* — two folders may hold an
- * `EMP_JBPOSTPRTL_gp88h82pwzbf0p47.xsodata` each and nothing collides. A CAP
- * service name is global, so those two produce `Duplicate definition of
- * artifact` and the model does not compile. TECK has two such pairs; the
- * developer hit the same wall by hand and resolved it by appending `123`.
+ * `EMP_JBPOSTPRTL_gp88h82pwzbf0p47.xsodata` each and nothing collides there. A
+ * CAP service name is global, so on paper that is a `Duplicate definition of
+ * artifact` once both are deployed. This used to "fix" that by prefixing every
+ * colliding name with a folder segment — which silently changed the OData path
+ * (`/EMP_…` became `/RSM_EMP_…`) for a name a UI, a destination, or a test
+ * script already calls by its NEO spelling. That is not this tool's contract
+ * to renegotiate, and a prefix nobody asked for breaks callers just as surely
+ * as a compile error does — more so, because a compile error is loud.
  *
- * The rule: keep the NEO name when it is unique, and when it is not, prefix
- * every member of the colliding group with the first folder segment that tells
- * them apart. Symmetric on purpose — renaming only the second one would make
- * the name depend on scan order.
+ * So the name is always exactly the NEO filename. A collision is reported
+ * (`SERVICE_NAME_COLLISION`, convert.js) and left as it is — the developer
+ * decides which one wins, or renames one `.xsodata` in NEO and re-runs.
  *
- * @param {{rel:string, base:string, dir:string}[]} services
- * @returns {Map<string, {name:string, from:?string}>} keyed by `rel`
+ * @param {{rel:string, base:string}[]} services
+ * @returns {Map<string, {name:string, collidesWith:string[]}>} keyed by `rel`
  */
 export function assignServiceNames(services) {
   const byBase = new Map();
   for (const s of services) {
     if (!byBase.has(s.base)) byBase.set(s.base, []);
-    byBase.get(s.base).push(s);
+    byBase.get(s.base).push(s.rel);
   }
 
   const out = new Map();
-  const taken = new Set();
-  const claim = (want) => {
-    let name = want;
-    for (let n = 2; taken.has(name); n++) name = `${want}_${n}`;
-    taken.add(name);
-    return name;
-  };
-
-  for (const [base, group] of byBase) {
-    if (group.length === 1) {
-      out.set(group[0].rel, { name: claim(base), from: null });
-      continue;
-    }
-    const segs = group.map((s) => s.dir.split('/').filter(Boolean));
-    const depth = Math.min(...segs.map((s) => s.length));
-    let at = 0;
-    while (at < depth && segs.every((s) => s[at] === segs[0][at])) at++;
-    for (const [i, s] of group.entries()) {
-      const qualifier = segs[i][at] || segs[i][segs[i].length - 1] || String(i + 1);
-      out.set(s.rel, { name: claim(`${qualifier}_${base}`), from: base });
-    }
+  for (const s of services) {
+    const group = byBase.get(s.base);
+    out.set(s.rel, { name: s.base, collidesWith: group.length > 1 ? group.filter((r) => r !== s.rel) : [] });
   }
   return out;
 }
@@ -155,12 +142,53 @@ function renderAssociation(nav, assoc, warnings, naming = 'navigation-alias') {
 }
 
 /**
+ * A projection over a parameterised calc view repeats the whole parameter list
+ * twice — CAP has no shorthand for "same as the thing I project on":
+ *
+ *   entity svxuac4g3i7dhzl4(pTABID: Integer)
+ *     as projection on ICBC_ADMIN_VIEWS_ADM_TLWMASTERDATA(pTABID: :pTABID);
+ *
+ * `.xsodata` never spells the parameter's type — HANA's `parameters via key and
+ * entity "…" results property "Execute"` clause names an OData Parameters
+ * entity, not the parameter itself, and 185 of 546 corpus views take one that
+ * clause never even mentions. The calc view's own `<variable parameter="true">`
+ * is the only place a name or a type is declared, which is why this reads
+ * `proxy.parameters` — the same list `cdsproxy.js` used to write the entity
+ * being projected onto — rather than anything out of the `.xsodata`. Missing
+ * this turns a legal HANA parameterised view into a service.cds entity CAP
+ * cannot address at all: `as projection on X` with no parameter list, over an
+ * `X` that requires one, fails to compile.
+ *
+ * @param {{id:string, datatype:string, length?, scale?}[]} parameters
+ * @param {object} typeMap
+ * @param {string[]} warnings   pushed into on an unmapped HANA type
+ * @returns {{decl:string, pass:string}|null} null when there are none
+ */
+function paramSignature(parameters, typeMap, warnings) {
+  if (!parameters?.length) return null;
+  // Same rule as the proxy itself: NEO's own spelling, never uppercased — the
+  // shipped corpus disagrees with itself on casing, so there is no precedent
+  // to normalise to, and getting it wrong means the two sides of "as
+  // projection on" no longer name the same parameter.
+  const names = parameters.map((p) => cdsIdent(p.id));
+  const decl = parameters
+    .map((p) => {
+      const { type, warning } = cdsType(p, typeMap);
+      if (warning) warnings.push(`parameter ${warning}`);
+      return `${cdsIdent(p.id)}: ${type || 'String'}`;
+    })
+    .join(', ');
+  const pass = names.map((n) => `${n}: :${n}`).join(', ');
+  return { decl, pass };
+}
+
+/**
  * @param {object} parsed        parseXsodata() result
  * @param {object} cfg           project config
  * @param {object} opts
  * @param {string} opts.serviceName    service name, already suffixed if it collides
  * @param {string} opts.serviceDir     absolute dir the service.cds will live in
- * @param {Function} opts.resolveProxy (namespace, entity) => {name, file} | null
+ * @param {Function} opts.resolveProxy (namespace, entity) => {name, file, elements, parameters} | null
  * @param {string} [opts.neoSource]    provenance path for the header comment
  * @param {Function} [opts.payloadParam] (entity) => the column its handler reads, for the cross-check
  * @returns {{text:string, warnings:string[], stats:object, unresolved:object[]}}
@@ -177,6 +205,8 @@ function generateServiceBlock(parsed, cfg, opts) {
   const assocByName = new Map((parsed.associations || []).map((a) => [a.name, a]));
   const naming = cfg.serviceGenerate?.associationNaming || 'navigation-alias';
   let navCount = 0;
+  const pc = cfg.cdsProxy || {};
+  const typeMap = { ...DEFAULT_TYPE_MAP, ...(pc.typeMap || {}) };
 
   for (const ent of parsed.entities || []) {
     // A create-using entity is a write endpoint: action only, no projection, no using.
@@ -263,12 +293,20 @@ function generateServiceBlock(parsed, cfg, opts) {
       ...navs,
     ];
 
+    // A parameterised calc view has to be addressed with its parameter list on
+    // BOTH sides of "as projection on" — see paramSignature above. Skipping
+    // this is silent right up until `cds build`, which is the one place NEO
+    // never validated it either.
+    const params = paramSignature(proxy.parameters, typeMap, warnings);
+    const aliasSig = params ? `(${params.decl})` : '';
+    const onClause = params ? `${proxy.name}(${params.pass})` : proxy.name;
+
     if (selected || navs.length) {
-      body.push(`    entity ${ent.alias} as projection on ${proxy.name} {`);
+      body.push(`    entity ${ent.alias}${aliasSig} as projection on ${onClause} {`);
       body.push(members.map((m) => `        ${m}`).join(',\n'));
       body.push('    };');
     } else {
-      body.push(`    entity ${ent.alias} as projection on ${proxy.name};`);
+      body.push(`    entity ${ent.alias}${aliasSig} as projection on ${onClause};`);
     }
     body.push('');
   }

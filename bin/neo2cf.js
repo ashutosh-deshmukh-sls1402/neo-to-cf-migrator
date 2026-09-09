@@ -41,6 +41,10 @@ OPTIONS
                       when it is a subfolder of the NEO repository (e.g. RSM).
                       Inferred from the .xsodata references; pass "" to take
                       the folder paths literally
+  --generic-service-names
+                      name every .xsodata's pair "service.cds"/"service.js"
+                      (the old behaviour). Default: named after the .xsodata
+                      itself, e.g. RSMfbIx….xsodata -> RSMfbIx….cds/.js
   --no-format         skip the final Prettier pass over the emitted .js.
                       Everything else splices, so without formatting the
                       output still diffs line-for-line against the NEO source
@@ -103,6 +107,7 @@ async function main(argv) {
         config: {
           ...(cdsBundle(flags) ? { cdsProxy: { bundle: cdsBundle(flags) } } : {}),
           ...(typeof flags['root-package'] === 'string' ? { rootPackage: { package: flags['root-package'] } } : {}),
+          ...(flags['generic-service-names'] ? { serviceNaming: { generic: true } } : {}),
         },
       });
       // Last, after every offset-based pass: Prettier rewrites the whole file.

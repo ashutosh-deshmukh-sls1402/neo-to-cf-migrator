@@ -263,3 +263,58 @@ test('--ai that is actually asked reports how many times, and how many were acce
   assert.match(note.message, /asked 1 time\(s\)/);
   assert.match(note.message, /1 accepted/);
 });
+
+/* ---------------- service.cds/.js naming — after the .xsodata itself, by default ---------------- */
+
+test('a service.cds/.js pair is named after its .xsodata by default', () => {
+  const root = tree({
+    'MOD/Library/MyLib.xsjslib': LIB,
+    'MOD/Services/RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.xsodata': XSODATA,
+  });
+  const r = convert(root, { schema: 'S' });
+  const paths = r.files.filter((f) => f.role === 'servicecds' || f.role === 'servicejs').map((f) => f.path).sort();
+  assert.deepEqual(paths, [
+    'srv/lib/S/MOD/Services/RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.cds',
+    'srv/lib/S/MOD/Services/RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.js',
+  ]);
+});
+
+test('serviceNaming.generic reverts to service.cds/.js', () => {
+  const root = tree({
+    'MOD/Library/MyLib.xsjslib': LIB,
+    'MOD/Services/RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.xsodata': XSODATA,
+  });
+  const r = convert(root, { schema: 'S', config: { serviceNaming: { generic: true } } });
+  const paths = r.files.filter((f) => f.role === 'servicecds' || f.role === 'servicejs').map((f) => f.path).sort();
+  assert.deepEqual(paths, [
+    'srv/lib/S/MOD/Services/service.cds',
+    'srv/lib/S/MOD/Services/service.js',
+  ]);
+});
+
+test('two .xsodata sharing a folder still merge into one pair, named after the first', () => {
+  const root = tree({
+    'MOD/Library/MyLib.xsjslib': LIB,
+    'MOD/Services/AAA_First.xsodata': XSODATA,
+    'MOD/Services/ZZZ_Second.xsodata': XSODATA,
+  });
+  const r = convert(root, { schema: 'S' });
+  const paths = r.files.filter((f) => f.role === 'servicecds' || f.role === 'servicejs').map((f) => f.path).sort();
+  assert.deepEqual(paths, [
+    'srv/lib/S/MOD/Services/AAA_First.cds',
+    'srv/lib/S/MOD/Services/AAA_First.js',
+  ]);
+  // and the merge is still reported, same as before
+  assert.ok(codes(r).includes('SERVICE_MERGED'));
+});
+
+test('the emitted service.cds still finds its own db/cds using(...) target under the new name', () => {
+  const root = tree({
+    'MOD/Views/V.calculationview': VIEW('V'),
+    'MOD/Services/svc.xsodata': `service { "S.MOD.Views::V" as "a" key("ID"); }`,
+  });
+  const r = convert(root, { schema: 'S' });
+  const cds = r.files.find((f) => f.role === 'servicecds');
+  assert.equal(path.basename(cds.path), 'svc.cds');
+  assert.match(cds.text, /^using .* from '\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/db\/cds\//m);
+});

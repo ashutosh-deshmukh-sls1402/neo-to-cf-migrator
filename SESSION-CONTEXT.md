@@ -23,7 +23,7 @@ left open. Read §0 first; §§1–10 are the reasoning, §§11–29 the build l
 
 **Every artifact type now converts, JavaScript included, and `convert` writes all
 of it, with no blockers on either corpus.** 7,959 lines of source, 533 of checks (+3,000 of
-tests), **345 tests, 0 failures**, two
+tests), **356 tests, 0 failures**, two
 runtime dependencies (`fast-xml-parser`, `acorn`).
 
 ```bash
@@ -33,7 +33,7 @@ node bin/neo2cf.js dbscan    <neo-dir> --show <rel-path>  # convert one file and
 node bin/neo2cf.js convert   <neo-dir> -o <out> --write   # dry run without --write
 node bin/neo2cf.js score     <neo-dir> --expect <cf-dir>  # score the emitted files vs a hand-migrated tree
 node bin/neo2cf.js convert   <neo-dir> -o <out> --write --ai claude   # Tier 2 (§28); default is --ai none
-node test/run.js                                          # 345 tests, no framework
+node test/run.js                                          # 356 tests, no framework
 
 # all of the above plus the CDS compiler, one command, non-zero exit on failure
 npm run verify -- <neo-dir> […] --expect <cf-dir> --cds <path-to-cds>
@@ -67,10 +67,13 @@ cd <out-dir> && npx cds build --production                # the only real oracle
 | **`create using` actions take their payload** | **Done** — `emit/servicecds.js`. Actions were declared `action X() returns String`, so `req.data.<COL>` in the handler read a parameter CAP was never told about. Parameters are now the `with(…)` columns minus the `key(…)` ones, plus the column the handler actually reads where the clause omits it (`ACTION_PAYLOAD_FROM_HANDLER`, 19 on ICBC). ADC/ARBDR: 1,631 actions, all parameterised; TECK 167, matching the hand migration's `(PAYLOAD: LargeString)` |
 | **converting a NEO subfolder** | **Done** — `inferRootPackage` in `convert.js`. `convert <repo>/RSM` used to produce 1,809 `PROXY_NOT_FOUND` blockers because the `.xsodata` names views by full package path. The missing prefix is read back off the references and put in front of every emitted path, so the subtree run is byte-identical to the whole-tree slice bar service-name collision qualifying. `--root-package ""` opts out |
 | **`--ai` looked broken on a subtree, wasn't** | **Diagnosed, plus `AI_TIER_SUMMARY`.** `convert ARBDR/RSM --ai …` finished in ~1s with no visible change — indistinguishable, from the terminal, from a broken backend. It wasn't: verified `cmd:ollama run qwen2.5-coder:7b` end-to-end (`dbscan --show` on `HRS_AdminConsole.xsjslib` took 51s and genuinely converted the one held-back statement). RSM's own refusals just don't contain a `hole-classify` or `handler-return` shape — Tier 1 already resolved almost everything else, and its one `SQL_DYNAMIC` is a `query += …` build, which is explicitly excluded from AI classification (§ "confident, silently wrong conversion"). `ensureHandlerReturns` now returns `asked` alongside `added`, and `convert()` emits one `AI_TIER_SUMMARY` note whenever `--ai` is given, saying how many times each task was actually put to the model — so "0" and "never asked" are visible instead of inferred. Side finding, not acted on: the local 7B model misclassified a `.join("','")`-built list hole as `value` rather than `list` on one statement — caught by nothing but the `AI-CLASSIFIED` comment it leaves for human review, which is exactly what that comment is for |
+| **service name/`@path` no longer renamed on collision** | **Reverted, on request.** `assignServiceNames` used to prefix every member of a colliding group with a folder segment (`service Employee_RSMfbIx… @(path:'/Employee_RSMfbIx…')`), changing the URL a UI already calls. It now always returns NEO's own name and path, unqualified — a collision is still reported as `SERVICE_NAME_COLLISION`, naming every other file sharing it, but nothing is renamed; resolving it is a human decision (rename one `.xsodata`, or hand-edit one `service.cds`). On ADC/ARBDR/RSM: 45 `SERVICE_NAME_COLLISION` findings, 0 renames |
+| **parameterised entities in `service.cds`** | **Done.** A `create using`-free entity whose calc view takes a HANA parameter (`<variable parameter="true">`) used to be projected as `entity A as projection on X;` — legal HANA, illegal CAP: `X` requires a parameter list and nothing supplied one. `servicecds.js`'s `paramSignature` now reads the parameter list off the calc view itself (`hit.cv.parameters`, plumbed through `resolveProxy` in `convert.js` — the same list `cdsproxy.js` already used to write the *proxy's* signature) and renders `entity A(P: T) as projection on X(P: :P)` on both a bare and a column-restricted projection. Not sourced from the `.xsodata`'s own `parameters via key and entity "…" results property "Execute"` clause — that names an OData Parameters entity, and on the corpus that name routinely does not match the parameter's real name (`svxuac4g3i7dhzl4` vs. the view's actual `pTABID`). Verified against `@sap/cds-compiler` directly (installed transiently, not a dependency): the emitted syntax compiles clean. ADC/ARBDR: 98 parameterised projections now correct, 0 before |
 | `.hdbprocedure` — **name and schema** | **Done** — `emit/hdbprocedure.js`. 880 procedures across the three corpora were previously copied verbatim, so each declared `PROCEDURE "ARBDR"."ARBDR.RSM.…::prX"`, carried `DEFAULT SCHEMA ARBDR`, and named the schema on every table — none of which exists in an HDI container. Now: name flattened by `flattenEntityName` (the form the handler's unquoted `CALL` folds to), `DEFAULT SCHEMA` dropped, qualifiers stripped, `SESSION_USER` replaced. `checks/procnames.js` guards the two sides agreeing; on ADC/ARBDR 462 of 467 `CALL` targets resolve, and the 5 that do not are dangling in the NEO source |
 | **hardcoded schema in the emitted JS** | **Done** — the SQL-variable drop in `emitdb.js` now asks whether *this assignment* can still be read rather than whether the *name* is used anywhere, which one shared `query` variable per function always answered yes to. ADC/ARBDR: string literals still carrying `"ARBDR".` fall 1,657 → 666, and 653 of those sit in files that also hold a statement the tool refused, which must keep its SQL verbatim |
 | **Prettier over the emitted JS** | **Done** — `src/emit/format.js`, run from the CLI after every offset-based pass (Prettier's API is async, `convert` is not). 0 failures on all three corpora; `--no-format` keeps the spliced output diffable against NEO |
 | **bundled CDS proxies** | **Done, opt-in** — `cdsProxy.bundle`: `null` (default, one `.cds` per view), `'all'` (`--single-cds`, one `db/cds/schema.cds`), `'module'` (`--module-cds`, one `db/cds/<MOD>/<MOD>_schema.cds`). Corpus A's 454 proxies become one 260 KB file; ADC/ARBDR's 2,132 become five module files. `service.cds` `using` lines follow either way |
+| **`service.cds`/`.js` named after the `.xsodata`** | **Done, on request; opt-out via `--generic-service-names`.** Every `.xsodata` folder used to emit a file called `service.cds` — indistinguishable from every other folder's `service.cds` except by directory, and 24 identical-looking tabs in `srv/index.cds`'s `using` list. `layout.js`'s `targetsFor` now names the pair after the `.xsodata`'s own basename (`RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.xsodata` -> `.cds`/`.js`); two `.xsodata` sharing a folder still merge into one pair, named after the first. `serviceNaming.generic` (`--generic-service-names`) reverts to the old name for a project that wants it. Verified byte-identical content either way (only the filename differs) and re-checked against the real CDS compiler on both TECK and ADC/ARBDR/RSM — same pre-existing `SERVICE_NAME_COLLISION` error count under both naming schemes, proving the file-naming change is orthogonal to the (already-known, already-accepted) `service` identifier collisions |
 
 Running `convert` on Corpus A emits **1,662 files** from NEO alone — including **87
 handlers** — with **no blockers**. Corpus B emits 2,181 files, 118 of them handlers,
@@ -1786,11 +1789,18 @@ an authorisation model is not migration.
 identified by its *path*; a CAP service name is global. Two folders each hold an
 `EMP_JBPOSTPRTL_gp88h82pwzbf0p47.xsodata`, and Corpus A has a second such pair. The
 developer hit this by hand and resolved it by appending `123` to one name.
-`assignServiceNames` now qualifies **both** members of a colliding group with
+`assignServiceNames` used to qualify **both** members of a colliding group with
 the first folder segment that tells them apart — symmetric, because renaming
-only the second would make the name depend on scan order. The URL changes, so
-each one gets a `SERVICE_NAME_COLLISION` finding naming the new path. 4 on Corpus A,
+only the second would make the name depend on scan order. The URL changed, so
+each one got a `SERVICE_NAME_COLLISION` finding naming the new path. 4 on Corpus A,
 28 on Corpus B.
+>
+> **Superseded 2025-09** — a caller already reaches the NEO name and path; this
+> tool renaming either to solve an internal bookkeeping problem breaks the UI
+> that calls it, silently, which is worse than the compile error it was
+> avoiding. `assignServiceNames` now always returns the NEO name unchanged; a
+> collision is still reported as `SERVICE_NAME_COLLISION`, but nothing is
+> renamed. See `emit/servicecds.js` and `docs/ARCHITECTURE.md`.
 
 **2 · `Element "BDLNT" has not been found` (111 errors).** An `.xsodata` names
 columns in `with(…)` that its calc view does not have — `BDLNT`, `BDLTP`,

@@ -72,6 +72,18 @@ export const DEFAULTS = Object.freeze({
      */
     bundle: null,
   },
+
+  serviceNaming: {
+    /**
+     * false (default): an `.xsodata`'s `service.cds`/`.js` pair is named after
+     * the `.xsodata` file itself — `RSMfbIx….xsodata` -> `RSMfbIx….cds` +
+     * `RSMfbIx….js` — so two different endpoints sitting in sibling folders
+     * are two differently-named files instead of two files both called
+     * `service.cds`, which is easy to open the wrong one of by accident.
+     * true: the old generic `service.cds`/`service.js` naming, every folder.
+     */
+    generic: false,
+  },
 });
 
 /** Deep-merge user config over the defaults. */

@@ -4,19 +4,62 @@ Converts a SAP NEO (XSJS/XSC) codebase into a SAP CF (CAP/Node.js) codebase,
 mirroring the NEO folder structure. Deterministic first; AI only where a parser
 genuinely cannot decide.
 
-```bash
-npm install
-node bin/neo2cf.js inventory <neo-dir>                    # survey; converts nothing
-node bin/neo2cf.js dbscan    <neo-dir>                    # how much .xsjs DB access converts automatically
-node bin/neo2cf.js dbscan    <neo-dir> --show <rel-path>  # convert one file and print it
-node bin/neo2cf.js convert   <neo-dir> -o <out> --write   # dry run without --write
-node bin/neo2cf.js score     <neo-dir> --expect <cf-dir>  # score against a hand-migrated tree
-node bin/neo2cf.js convert   <neo-dir> -o <out> --write --module-cds  # one .cds per module
-node bin/neo2cf.js convert   <neo-dir> -o <out> --write --ai claude   # + Tier 2
-node test/run.js                                          # 345 tests
-npm run verify -- <neo-dir> --cds <path-to-cds>            # the whole sweep, incl. cds build
+## Install
 
+```bash
+npm install          # three runtime dependencies: acorn, fast-xml-parser, prettier
+node test/run.js     # 356 tests, ~2s
 ```
+
+Node 18+. No HANA, no CF account, no model required — those only matter for
+`--ai` and for `cds build` at the very end.
+
+## Usage
+
+```bash
+NEO=C:/path/to/neo-codebase
+OUT=C:/path/to/output                                    # anywhere OUTSIDE the NEO tree
+
+# survey — converts nothing
+node bin/neo2cf.js inventory $NEO [--schema X] [--app A,B] [--json]
+
+# how much of the JS converts, before you commit to anything — converts nothing to disk
+node bin/neo2cf.js dbscan $NEO [--ai <backend>] [--json]
+node bin/neo2cf.js dbscan $NEO --show <rel/path/File.xsjs>          # convert one file, print it
+
+# convert — dry run unless --write; -o/--out is required to write
+node bin/neo2cf.js convert $NEO -o $OUT                              # dry run — read the findings
+node bin/neo2cf.js convert $NEO -o $OUT --write                      # write it
+node bin/neo2cf.js convert $NEO -o $OUT --write --force              # write past blockers anyway
+node bin/neo2cf.js convert $NEO -o $OUT --write --schema TECK --app JOB_BIDDING   # override inferred values
+node bin/neo2cf.js convert $NEO -o $OUT --write --single-cds         # one db/cds/schema.cds, not one .cds per view
+node bin/neo2cf.js convert $NEO -o $OUT --write --module-cds         # one db/cds/<MODULE>/<MODULE>_schema.cds
+node bin/neo2cf.js convert $NEO -o $OUT --write --root-package ""    # converting a subfolder of the repo, taken literally
+node bin/neo2cf.js convert $NEO -o $OUT --write --generic-service-names   # service.cds/.js, not <xsodata-name>.cds/.js
+node bin/neo2cf.js convert $NEO -o $OUT --write --no-format          # skip the Prettier pass over the emitted .js
+node bin/neo2cf.js convert $NEO -o $OUT --write --ai claude          # + Tier 2, the claude CLI
+node bin/neo2cf.js convert $NEO -o $OUT --write --ai "cmd:ollama run qwen2.5-coder"   # + Tier 2, any local runner
+node bin/neo2cf.js convert $NEO -o $OUT --json                       # machine-readable output, any of the above
+
+cd $OUT && npm install && npx cds build --production                 # does CAP accept it?
+
+# score the emitted paths against a hand-migrated CF tree, if you have one for this NEO source
+node bin/neo2cf.js score $NEO --expect <hand-migrated-cf-dir> [--json]
+
+# tests, and the whole sweep in one command: tests + both conversions +
+# emitted-tree checks + score + cds build
+node test/run.js
+npm run verify -- $NEO [<neo-dir> …] --expect <cf-dir> --cds <path-to-cds> [--out <dir>] [--no-build]
+```
+
+`--root-package` and `--generic-service-names` are opt-outs, not switches you
+need day to day: `--root-package` is inferred automatically when converting a
+subfolder of the repository, and service files are named after their
+`.xsodata` by default. `--single-cds`/`--module-cds`/`--generic-service-names`
+are mutually about *how many files* the output is split into, never about
+*what* converts — the emitted code is identical either way, only the file
+layout changes. Full flag reference, sample output, and what each finding code
+means: [`docs/USAGE.md`](docs/USAGE.md).
 
 **Status: every artifact type converts.** `.calculationview`, `.hdbprocedure`
 and `.xsodata` are done. For `.xsjs`/`.xsjslib`, JDBC becomes `await cds.run`:
@@ -118,7 +161,7 @@ checks/              verify.js  (THE SWEEP — everything below, plus cds build)
                      leaks.js   (what is left of the $. surface),
                      awaits.js  (every cross-file async call is awaited),
                      emitted.js (scope / sentinel / re-parse over an out-dir)
-test/                345 tests, no framework
+test/                356 tests, no framework
 ```
 
 Several modules are ported from `C:\Sodales\Tools\migration-cleanup-toolkit`

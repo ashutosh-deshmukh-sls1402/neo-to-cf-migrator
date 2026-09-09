@@ -11,7 +11,7 @@ For how it works internally, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ```bash
 cd C:/Sodales/Tools/neo-to-cf-migrator
 npm install          # three runtime dependencies: acorn, fast-xml-parser, prettier
-node test/run.js     # 345 tests, ~2s. Run this first, once.
+node test/run.js     # 356 tests, ~2s. Run this first, once.
 ```
 
 Node 18+. Nothing else is required — no HANA, no CF account, no model.
@@ -126,8 +126,18 @@ node bin/neo2cf.js dbscan $NEO --show Library/CommonUtil.xsjslib | less
 node bin/neo2cf.js convert <neo-dir> -o <out-dir> [--write] [--force]
                                      [--schema X] [--app A,B] [--ai <backend>] [--json]
                                      [--single-cds | --module-cds] [--no-format]
-                                     [--root-package <p>]
+                                     [--root-package <p>] [--generic-service-names]
 ```
+
+**An `.xsodata`'s `.cds`/`.js` pair is named after the `.xsodata` itself by
+default** — `RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.xsodata` becomes
+`RSMfbIx3y5iamfxJhGOD9yEJ1ejviXQLb23.cds` + `.js`, in the same folder. Every
+`.xsodata` folder used to produce a file called `service.cds`, so having several
+tabs open at once — or an `srv/index.cds` with two dozen `using` lines — meant
+telling them apart only by their directory. Two `.xsodata` sharing one folder
+still merge into one pair (§ below), named after the first of them.
+`--generic-service-names` reverts to the old `service.cds`/`service.js` name
+everywhere, if a project would rather have that.
 
 **Point it at the repository root.** A NEO `.xsodata` names its views by full
 package path (`ARBDR.RSM.AdminConsole.Views::X`), so converting a subfolder
@@ -418,11 +428,13 @@ The tool is explicit about this rather than quiet, and the list is short.
 | `ACTION_PAYLOAD_FROM_HANDLER` | A `create using` action's parameter came from the handler (which reads `req.data.<column>`) rather than from the `.xsodata`'s `with(…)` clause, because that clause does not name it. 19 of ICBC's entities are like this. Check the parameter is the one the caller sends. |
 | `PROCEDURE_NAME_UNCHANGED` | A `.hdbprocedure` header does not declare a NEO repository path, so its name was left alone. Every other procedure's name is flattened to the name a handler's `cds.run('CALL …')` asks for; check this one agrees by hand. |
 | `DEFAULT_SCHEMA_FOREIGN` | `DEFAULT SCHEMA` names a schema this project does not own, so the clause was left in place. Unqualified names in that procedure resolve there, which an HDI container cannot do without a synonym. |
+| `SERVICE_NAME_COLLISION` | Two `.xsodata` in different folders share a file name, and a CAP service name is global while NEO's was scoped by folder — only one survives a deploy. The name and `@(path:…)` are kept **exactly as NEO's** on both, never qualified with a folder prefix, because a caller already reaches that path. Rename one `.xsodata` in NEO and re-run, or edit one of the generated `service.cds` files by hand. |
 | `AFTER_TABLE_PAYLOAD` | NEO read the request body out of a temporary table it named on `param.afterTableName`. CAP passes the request itself, so the `SELECT` is gone and the payload is `req.data.<COLUMN>`. Nothing to do — the note is there so a reader can see where the query went. |
 | `AFTER_TABLE_RESPONSE` | NEO's answer to the caller was an `UPDATE` writing it back into that table. It is now a `return`. Where code still runs after the write, the value is held in `neoResponse` and returned where the function ends instead — the finding says which happened. Check it is the value the caller should get. |
 | `FORMAT_FAILED` | Prettier could not parse a converted file, so it was written unformatted. A file that will not parse will not run either: this means an earlier pass produced broken JavaScript, and it is a bug worth reporting. |
 | `AI_RETURN_ADDED` | A model chose which variable an action handler answers with, and the tool wrote the `return`. Marked `AI-CHOSEN RETURN` in the file — read it. |
 | `AI_TIER_SUMMARY` | Printed once, only when `--ai` is given. Says how many times the model was actually asked and how many answers were accepted — see below. |
+| A parameterised calc view (`entity A(P: T) as projection on X(P: :P)`) | This is expected for any view with a HANA parameter (`<variable parameter="true">`) — CAP requires the parameter list on both sides of `as projection on`. Not a finding; look for it if you're checking `service.cds` against `.xsodata` by eye, since NEO's own file never spells the type. |
 | `cds build` reports a missing entity | A `.xsodata` projects a calculation view that is not in this tree (`PROXY_NOT_FOUND`). Convert the module that owns it, or drop the entity. |
 | `--ai claude` fails with "could not be reached" | The `claude` CLI is not on `PATH`, or not authenticated. The run continues without it; refusals stay refusals. |
 | `--ai` finishes instantly with nothing to show for it | Read the `AI_TIER_SUMMARY` finding first — a fast run isn't necessarily a broken backend. The two Tier 2 tasks are narrow on purpose: `hole-classify` only applies to a SQL string built by concatenation with a hole quote-parity cannot decide, and `handler-return` only applies to an action handler that returns nothing but has a candidate variable to offer. A subtree conversion in particular can easily have zero of either — most of its refusals are things Tier 1 already resolved, or shapes Tier 2 explicitly is not for (`SQL_DYNAMIC` from `query += …`, service-name collisions, missing keys, …). If `AI_TIER_SUMMARY` says "asked N time(s)", the backend ran; if it says "the model was never asked", nothing in this run matched either task and the backend was never the problem. |

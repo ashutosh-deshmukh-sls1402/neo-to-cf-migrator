@@ -64,12 +64,26 @@ test('a top-level non-app package sits directly under the schema', () => {
   assert.deepEqual(paths(t), ['srv/lib/TECK/Env_Config/handlers/CommonUtil.js']);
 });
 
-test('.xsodata becomes the service.cds + service.js pair, in place', () => {
+test('.xsodata becomes a .cds + .js pair, in place, named after itself by default', () => {
   const t = targetsFor({
     relPath: 'JOB_BIDDING/JB_HR/JB_CRTJBPSTNG/Services/HR.xsodata',
     kind: KIND.SERVICE,
     schema: 'TECK',
     app: 'JOB_BIDDING',
+  });
+  assert.deepEqual(paths(t), [
+    'srv/lib/TECK/JOB_BIDDING/JB_HR/JB_CRTJBPSTNG/Services/HR.cds',
+    'srv/lib/TECK/JOB_BIDDING/JB_HR/JB_CRTJBPSTNG/Services/HR.js',
+  ]);
+});
+
+test('genericServiceNames reverts to the old service.cds/service.js pair', () => {
+  const t = targetsFor({
+    relPath: 'JOB_BIDDING/JB_HR/JB_CRTJBPSTNG/Services/HR.xsodata',
+    kind: KIND.SERVICE,
+    schema: 'TECK',
+    app: 'JOB_BIDDING',
+    genericServiceNames: true,
   });
   assert.deepEqual(paths(t), [
     'srv/lib/TECK/JOB_BIDDING/JB_HR/JB_CRTJBPSTNG/Services/service.cds',
@@ -112,5 +126,5 @@ test('a file at the root of the NEO tree gets no "." segment in its target path'
   assert.equal(p[0].path, 'db/src/Thing.hdbprocedure');
 
   const s = targetsFor({ relPath: 'Svc.xsodata', kind: KIND.SERVICE, schema: 'TECK', app: null });
-  assert.equal(s[0].path, 'srv/lib/TECK/service.cds');
+  assert.equal(s[0].path, 'srv/lib/TECK/Svc.cds');
 });

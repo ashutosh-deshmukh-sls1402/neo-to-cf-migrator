@@ -71,7 +71,7 @@ src/emit/       data → CF file text
   cdsproxy.js     db/cds/*.cds — the CAP entity over the deployed view
                   (one per view; --single-cds bundles all, --module-cds one
                   per top-level module — cdsProxy.bundle, resolved in layout.js)
-  servicecds.js   service.cds from the .xsodata
+  servicecds.js   service.cds from the .xsodata (parameterised calc views too)
   servicejs.js    service.js — the handler wiring
   project.js      package.json, mta.yaml, srv/index.cds, xs-security.json, db/
   awaits.js       cross-file await propagation over the whole emitted tree
@@ -85,7 +85,7 @@ src/ai/         Tier 2 — the only non-deterministic code in the tool
 
 src/report/render.js   every line of terminal output
 checks/                measurements that need a real corpus (§7)
-test/                  345 tests, no framework
+test/                  356 tests, no framework
 ```
 
 ---
@@ -172,7 +172,7 @@ the corpus is *not* the scenario id inside the XML.
 | `.calculationview` | `db/src/…/X.hdbcalculationview` (a projection) + `db/src/…/TABLE_FUNCTION_X.hdbfunction` (the SQLScript) + `db/cds/…/ENTITY.cds` (the CAP proxy) | `hdbcalcview`, `hdbfunction`, `cdsproxy` |
 | `.xsodata` `create using` | an `action` in the `service.cds`, its parameters the `with(…)` columns minus the `key(…)` ones, plus whatever column the handler reads | `servicecds` |
 | `.hdbprocedure` | `db/src/…/same-name` — the declared name flattened, `DEFAULT SCHEMA` dropped, schema qualifiers stripped, `SESSION_USER` replaced | `hdbprocedure` |
-| `.xsodata` | `srv/lib/<SCHEMA>/…/service.cds` + `service.js` | `servicecds`, `servicejs` |
+| `.xsodata` | `srv/lib/<SCHEMA>/…/<xsodata-name>.cds` + `.js` (`service.cds`/`.js` with `--generic-service-names`) | `servicecds`, `servicejs` |
 | `.xsjs` / `.xsjslib` | `srv/lib/<SCHEMA>/…/handlers/X.js` | `transform/file.js` |
 
 Two path asymmetries, both verified against a shipped CF tree and both easy to
@@ -181,10 +181,27 @@ get wrong (`core/layout.js`):
 - **`db/src` and `db/cds` DROP the `<APP>` segment.**
 - **`srv/lib` KEEPS it,** under `srv/lib/<SCHEMA>/`.
 
-`.xsodata` files in the same folder are merged into **one** `service.cds` with
-one deduplicated `using` header, because two services in one folder would
-otherwise fight over the same file name. CAP service names are global, so
-colliding names are qualified by the first differing folder segment.
+`.xsodata` files in the same folder are merged into **one** `.cds`/`.js` pair —
+named after the *first* of them — with one deduplicated `using` header, because
+two services in one folder would otherwise need two files. The pair is named
+after the `.xsodata` itself by default (`layout.js`'s `targetsFor`, the
+`stem`), not the generic `service.cds`/`service.js` every folder used to
+produce — every folder's file was named identically, distinguishable only by
+its directory, which made an `srv/index.cds` of two dozen `using` lines or a
+stack of open editor tabs hard to tell apart. `--generic-service-names`
+(`serviceNaming.generic`) reverts to the old generic name.
+
+CAP service names are global, unlike NEO's, so two `.xsodata` in *different*
+folders can share a name — the service name and `@(path:…)` are kept exactly as
+NEO's either way, never qualified with a folder segment; a caller already
+reaches that name and path, and this tool does not get to renegotiate the
+contract to fix an internal collision. The collision itself is reported
+(`SERVICE_NAME_COLLISION`) and left for a developer to resolve — see
+`emit/servicecds.js`. That is a collision of the CDS `service` *identifier*,
+independent of the file-naming above; two `.xsodata` with different filenames
+can still declare the same `service` name and collide, and two with the same
+filename in different folders now produce two differently-named *files* that
+may still collide by *name*.
 
 ### Whole-tree passes
 

@@ -96,6 +96,8 @@ export function convert(neoRoot, opts = {}) {
   const app = cfg.apps[0] ?? null;
   /** Opt-in: null = one .cds per view, 'all' = one file, 'module' = one per module. */
   const cdsBundle = cfg.cdsProxy.bundle ?? null;
+  /** Default: name a service's .cds/.js after the .xsodata itself, not "service". */
+  const genericServiceNames = !!cfg.serviceNaming?.generic;
 
   const files = [];
   /** Schemas the tree reads and does not own — they become mta.yaml resources. */
@@ -404,15 +406,16 @@ export function convert(neoRoot, opts = {}) {
     services.map((s) => ({
       rel: s.rel,
       base: path.basename(s.file, '.xsodata').replace(/[^A-Za-z0-9_]/g, '_'),
-      dir: posix(s.neoDir || ''),
     })),
   );
   for (const [rel, n] of serviceNames) {
-    if (!n.from) continue;
+    if (!n.collidesWith.length) continue;
     findings.push(
       finding('warning', 'SERVICE_NAME_COLLISION',
-        `${rel}: another folder has an .xsodata of the same name, and a CAP service name is global — this one is served at "/${n.name}", not "/${n.from}".`,
-        { file: rel, fix: 'Update the callers of this endpoint, or rename the .xsodata in NEO and re-run.' }),
+        `${rel}: service "${n.name}" is also declared by ${n.collidesWith.join(', ')} — a CAP service name ` +
+        `is global, and only one of them survives a deploy. The name is kept exactly as NEO's rather than ` +
+        `qualified, so the path a caller already uses does not change; you decide which one wins.`,
+        { file: rel, fix: 'Rename one .xsodata in NEO and re-run, or edit one of the generated service.cds files by hand.' }),
     );
   }
 
@@ -423,13 +426,14 @@ export function convert(neoRoot, opts = {}) {
   }
 
   for (const [neoDir, group] of serviceByDir) {
-    // Two `.xsodata` in one folder both map to `service.cds`. They are not in
-    // conflict — a `.cds` file holds as many `service` blocks as you like, each
-    // with its own path, and one `service.js` can wire the handlers for all of
-    // them because every alias is a distinct hash. That is what the shipped CF
-    // does with these same two folders, so merge rather than skip.
+    // Two `.xsodata` in one folder both land in one file — named after the
+    // first of them by default. They are not in conflict: a `.cds` file holds
+    // as many `service` blocks as you like, each with its own path, and one
+    // `.js` can wire the handlers for all of them because every alias is a
+    // distinct hash. That is what the shipped CF does with these same two
+    // folders, so merge rather than skip.
     const first = group[0];
-    const targets = targetsFor({ relPath: repoPath(first.rel), kind: KIND.SERVICE, schema, app });
+    const targets = targetsFor({ relPath: repoPath(first.rel), kind: KIND.SERVICE, schema, app, genericServiceNames });
     const cdsPath = targets.find((t) => t.role === 'servicecds').path;
     const jsPath = targets.find((t) => t.role === 'servicejs').path;
 
@@ -477,9 +481,17 @@ export function convert(neoRoot, opts = {}) {
           neoSource: s.rel,
           resolveProxy: (ns, entity) => {
             const hit = proxies.get(`${ns}::${entity}`);
+            if (!hit) return null;
             // The element list is what lets the emitter drop a `with(…)` column
             // the view does not actually have — a NEO defect CAP refuses to compile.
-            return hit ? { name: hit.name, file: hit.file, elements: (hit.cv.viewAttributes || []).map((a) => a.id) } : null;
+            // The parameter list is what makes a projection over a parameterised
+            // calc view legal at all — see servicecds.js's paramSignature.
+            return {
+              name: hit.name,
+              file: hit.file,
+              elements: (hit.cv.viewAttributes || []).map((a) => a.id),
+              parameters: hit.cv.parameters || [],
+            };
           },
           payloadParam: (ent) => {
             const target = handlerPathFor(ent.createUsing.lib, schema);

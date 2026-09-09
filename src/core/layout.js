@@ -61,9 +61,11 @@ function cdsPath(bundle, dbDir, entityName) {
  * @param {string|null} args.app e.g. "JOB_BIDDING", or null if none
  * @param {string} [args.entityName] flattened entity name, for the cds proxy
  * @param {string|null} [args.cdsBundle] null | 'all' | 'module' — see cdsPath
+ * @param {boolean} [args.genericServiceNames] true: KIND.SERVICE always emits
+ *   service.cds/service.js. false (default): named after the .xsodata itself.
  * @returns {{path:string, role:string}[]} every file this NEO file becomes
  */
-export function targetsFor({ relPath, kind, schema, app, entityName, cdsBundle }) {
+export function targetsFor({ relPath, kind, schema, app, entityName, cdsBundle, genericServiceNames }) {
   const dir = posix(path.dirname(relPath));
   const base = path.basename(relPath);
   const stem = base.slice(0, base.lastIndexOf('.'));
@@ -83,12 +85,18 @@ export function targetsFor({ relPath, kind, schema, app, entityName, cdsBundle }
       // reached from JS via cds.run('CALL ...').
       return [{ path: join('db/src', withoutApp(dir, app), base), role: 'procedure' }];
 
-    case KIND.SERVICE:
-      // One .xsodata becomes the service.cds + service.js pair, in place.
+    case KIND.SERVICE: {
+      // One .xsodata becomes a .cds + .js pair, in place. Named after the
+      // .xsodata itself by default — two endpoints in sibling folders are then
+      // two differently-named files, not two files both called `service.cds`
+      // that only their path tells apart. `genericServiceNames` reverts to
+      // that generic name for a project that would rather have it.
+      const base = genericServiceNames ? 'service' : stem;
       return [
-        { path: join(`srv/lib/${schema}`, dir, 'service.cds'), role: 'servicecds' },
-        { path: join(`srv/lib/${schema}`, dir, 'service.js'), role: 'servicejs' },
+        { path: join(`srv/lib/${schema}`, dir, `${base}.cds`), role: 'servicecds' },
+        { path: join(`srv/lib/${schema}`, dir, `${base}.js`), role: 'servicejs' },
       ];
+    }
 
     case KIND.LIBRARY:
       // .xsjs and .xsjslib both become one handler file, mirroring the NEO path
